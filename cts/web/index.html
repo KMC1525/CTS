@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0a0a">
+  <title>CTS - Comic To Story</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Icon sprite -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+      <symbol id="i-zip" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4M10 8h2M10 11h2M10 14h2m-2 3h2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 5v14l12-7z" fill="currentColor"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12m0 0 5-5m-5 5-5-5M4 20h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5zM4 20.5A2.5 2.5 0 0 0 6.5 23H20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19zM12 10v4.5m0 2.5v.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 9.5a4 4 0 0 1-.5 8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+      <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+      <symbol id="i-pen" viewBox="0 0 24 24"><path d="m4 20 1-4L16.5 4.5a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8 19zM14 7l3 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+      <symbol id="i-memory" viewBox="0 0 24 24"><path d="M5 5h14v14H5zM9 9h6v6H9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+      <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9m6.4-5.4a8 8 0 1 1-12.8 0" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="app">
+    <!-- ============================= LEFT RAIL ============================= -->
+    <aside class="rail" aria-label="Attachments and settings">
+      <header class="brand">
+        <img src="favicon.svg" alt="" width="34" height="34">
+        <div class="brand-text"><strong>CTS</strong><span>Comic To Story</span></div>
+      </header>
+
+      <section class="zipbox" aria-labelledby="zip-title">
+        <h2 id="zip-title" class="section-title">Comic volumes</h2>
+        <div class="drop" id="drop" tabindex="0" role="button"
+             aria-label="Attach comic volumes. Drop folders or ZIP files here, or press Enter to choose ZIP files.">
+          <svg class="icon icon-lg"><use href="#i-upload"/></svg>
+          <p class="drop-title">Drop folders or ZIPs here</p>
+          <p class="drop-sub">One folder or ZIP = one volume. Add several to generate them in order.</p>
+          <div class="drop-actions">
+            <button type="button" class="chip-btn" id="pick-zip-btn"><svg class="icon"><use href="#i-zip"/></svg>ZIP / CBZ</button>
+            <button type="button" class="chip-btn" id="pick-folder-btn"><svg class="icon"><use href="#i-folder"/></svg>Folder</button>
+          </div>
+        </div>
+        <input type="file" id="pick-zip" accept=".zip,.cbz" multiple hidden>
+        <input type="file" id="pick-folder" webkitdirectory multiple hidden>
+        <ul class="volumes" id="volumes" aria-live="polite"></ul>
+      </section>
+
+      <section class="options" aria-labelledby="opt-title">
+        <h2 id="opt-title" class="section-title">Novel options</h2>
+        <div class="field">
+          <span class="label" id="rating-label">Edition</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="rating-label" id="rating">
+            <button type="button" role="radio" aria-checked="true" data-value="sfw">SFW</button>
+            <button type="button" role="radio" aria-checked="false" data-value="nsfw">NSFW</button>
+          </div>
+        </div>
+        <div class="field-row">
+          <label class="field">
+            <span class="label">Words per page</span>
+            <input type="number" id="words" min="80" max="1200" step="10" value="300">
+          </label>
+          <label class="field">
+            <span class="label">Novel language</span>
+            <select id="language"></select>
+          </label>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="carry" checked>
+          <span>Keep names and story consistent across volumes</span>
+        </label>
+        <button type="button" class="primary" id="start" disabled>
+          <svg class="icon"><use href="#i-sparkle"/></svg><span>Generate novel</span>
+        </button>
+      </section>
+
+      <footer class="rail-foot">
+        <button type="button" class="settings-btn" id="open-settings">
+          <svg class="icon"><use href="#i-gear"/></svg>
+          <span class="settings-text"><strong>Settings</strong><small id="provider-chip">Choose a provider</small></span>
+        </button>
+      </footer>
+    </aside>
+
+    <!-- ============================ RIGHT: STORY ============================ -->
+    <main class="story" aria-label="Story">
+      <header class="story-head" id="story-head" hidden>
+        <div class="head-main">
+          <h1 class="story-title" id="story-title">Story</h1>
+          <span class="pill" id="job-pill">idle</span>
+        </div>
+        <div class="head-actions">
+          <select id="job-history" aria-label="Previous runs"></select>
+          <button type="button" class="ghost" id="resume-btn" hidden><svg class="icon"><use href="#i-play"/></svg>Resume</button>
+          <button type="button" class="ghost danger" id="stop-btn" hidden><svg class="icon"><use href="#i-stop"/></svg>Stop</button>
+          <button type="button" class="ghost" id="delete-job-btn" hidden aria-label="Delete this run"><svg class="icon"><use href="#i-trash"/></svg></button>
+        </div>
+      </header>
+
+      <section class="empty" id="empty">
+        <div class="empty-inner">
+          <img src="favicon.svg" alt="" width="64" height="64">
+          <h1>Turn comic pages into a novel</h1>
+          <p>Attach a volume on the left and press <strong>Generate</strong>. Every comic page becomes exactly one novel page.</p>
+          <ol class="pipeline">
+            <li><svg class="icon"><use href="#i-eye"/></svg><strong>Read</strong><span>Panels, dialogue, faces, mood</span></li>
+            <li><svg class="icon"><use href="#i-pen"/></svg><strong>Write</strong><span>One page of prose, in order</span></li>
+            <li><svg class="icon"><use href="#i-sparkle"/></svg><strong>Polish</strong><span>Fidelity, style, length</span></li>
+            <li><svg class="icon"><use href="#i-memory"/></svg><strong>Remember</strong><span>Names and plot stay consistent</span></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="job" id="job" hidden>
+        <div class="overall">
+          <div class="progress" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" id="overall-bar"><span></span></div>
+          <div class="stats" id="stats"></div>
+        </div>
+        <div class="vol-tabs" id="vol-tabs" role="tablist" aria-label="Volumes"></div>
+        <div class="vol-toolbar">
+          <div class="now" id="now" aria-live="polite"></div>
+          <div class="vol-actions">
+            <button type="button" class="ghost" id="bible-btn"><svg class="icon"><use href="#i-book"/></svg>Story bible</button>
+            <button type="button" class="ghost" id="log-btn"><svg class="icon"><use href="#i-alert"/></svg>Activity</button>
+            <span class="downloads" id="downloads"></span>
+          </div>
+        </div>
+        <div class="alert" id="job-alert" hidden role="alert"></div>
+        <div class="feed" id="feed" tabindex="0" aria-label="Generated novel pages"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ============================== SETTINGS ============================== -->
+  <dialog id="settings" aria-labelledby="settings-title">
+    <form method="dialog" class="dlg-head">
+      <h2 id="settings-title">Settings</h2>
+      <button class="icon-btn" value="close" aria-label="Close settings"><svg class="icon"><use href="#i-x"/></svg></button>
+    </form>
+    <div class="dlg-body">
+      <section class="card">
+        <h3>AI provider</h3>
+        <div class="segmented wide" role="radiogroup" aria-label="Provider type" id="provider-type">
+          <button type="button" role="radio" data-value="frontier" aria-checked="true"><svg class="icon"><use href="#i-cloud"/></svg>Frontier AI</button>
+          <button type="button" role="radio" data-value="local" aria-checked="false"><svg class="icon"><use href="#i-chip"/></svg>Local models (GGUF)</button>
+        </div>
+
+        <!-- Frontier -->
+        <div id="panel-frontier" class="stack">
+          <label class="field"><span class="label">Provider</span><select id="f-provider"></select></label>
+          <label class="field"><span class="label">API key <em id="f-key-state" class="muted"></em></span>
+            <span class="input-row">
+              <input type="password" id="f-key" autocomplete="off" spellcheck="false" placeholder="Paste your key">
+              <button type="button" class="ghost" id="f-key-clear">Clear</button>
+            </span>
+          </label>
+          <label class="field"><span class="label">Model</span>
+            <input type="text" id="f-model" list="f-models" autocomplete="off" spellcheck="false" placeholder="Model name">
+            <datalist id="f-models"></datalist>
+          </label>
+          <label class="field" id="f-url-field" hidden><span class="label">Base URL</span>
+            <input type="url" id="f-url" autocomplete="off" spellcheck="false" placeholder="http://localhost:1234/v1">
+          </label>
+          <p class="hint" id="f-note"></p>
+          <p class="hint">The model must accept images. Your key is stored only on this computer.</p>
+        </div>
+
+        <!-- Local -->
+        <div id="panel-local" class="stack" hidden>
+          <div class="row-between" id="runtime-row">
+            <div><strong>Engine (llama.cpp)</strong><p class="hint" id="runtime-text">Checking...</p></div>
+            <button type="button" class="ghost" id="runtime-btn">Install</button>
+          </div>
+          <div class="progress slim" id="runtime-progress" hidden><span></span></div>
+
+          <label class="field"><span class="label">Model</span><select id="l-model"></select></label>
+          <label class="field" id="l-custom-field" hidden><span class="label">Hugging Face repo</span>
+            <span class="input-row">
+              <input type="text" id="l-custom" placeholder="owner/model-GGUF" spellcheck="false" autocomplete="off">
+              <button type="button" class="ghost" id="l-search-btn">Search</button>
+            </span>
+          </label>
+          <ul class="results" id="l-results" hidden></ul>
+          <button type="button" class="ghost" id="l-check" >Show quantizations</button>
+
+          <div id="l-quants-wrap" hidden>
+            <span class="label">Quantization <em class="muted">- smaller = faster and lighter, larger = better quality</em></span>
+            <div class="quants" id="l-quants" role="radiogroup" aria-label="Quantization"></div>
+            <p class="hint" id="l-vision"></p>
+            <div class="row-between">
+              <span class="hint" id="l-size"></span>
+              <button type="button" class="primary small" id="l-install"><svg class="icon"><use href="#i-download"/></svg>Install</button>
+            </div>
+          </div>
+          <div class="progress slim" id="l-progress" hidden><span></span></div>
+          <p class="hint" id="l-progress-text" hidden></p>
+
+          <div id="l-installed-wrap" hidden>
+            <span class="label">Installed models</span>
+            <ul class="installed" id="l-installed"></ul>
+          </div>
+          <label class="field"><span class="label">Hugging Face token <em class="muted" id="l-token-state"></em> <em class="muted">- optional, for gated models</em></span>
+            <input type="password" id="l-token" autocomplete="off" spellcheck="false" placeholder="hf_...">
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Context window</h3>
+        <div class="field-row">
+          <label class="field"><span class="label">Size (tokens)</span><select id="ctx"></select></label>
+          <label class="field" id="ctx-custom-field" hidden><span class="label">Custom</span><input type="number" id="ctx-custom" min="2048" step="1024"></label>
+        </div>
+        <p class="hint">How much text the model can hold at once. Larger windows let CTS feed more of the story-so-far to each page
+        (better continuity) but need more memory with local models. 16K-32K is a good start; 8K is the practical minimum.</p>
+      </section>
+
+      <section class="card">
+        <h3>About</h3>
+        <p class="hint" id="about-text"></p>
+        <div class="row-between">
+          <span class="hint">Closing this tab does not stop CTS.</span>
+          <button type="button" class="ghost danger" id="quit-btn"><svg class="icon"><use href="#i-power"/></svg>Quit CTS</button>
+        </div>
+      </section>
+    </div>
+    <footer class="dlg-foot">
+      <span class="test-result" id="test-result" aria-live="polite"></span>
+      <button type="button" class="ghost" id="test-btn">Save &amp; test connection</button>
+      <button type="button" class="primary small" id="save-btn">Save</button>
+    </footer>
+  </dialog>
+
+  <dialog id="adult" aria-labelledby="adult-title" class="small-dlg">
+    <h2 id="adult-title">Adults only</h2>
+    <p>The NSFW edition writes mature and sexual material between adult characters where the comic shows or implies it.
+       Pages that may involve minors are always written without sexual content.</p>
+    <p class="hint">Hosted AI providers may decline NSFW pages; CTS then falls back to the SFW version of that page. Local models are the most reliable choice.</p>
+    <div class="dlg-actions">
+      <button type="button" class="ghost" id="adult-no">Cancel</button>
+      <button type="button" class="primary small" id="adult-yes">I am 18 or older</button>
+    </div>
+  </dialog>
+
+  <dialog id="bible" aria-labelledby="bible-title" class="reader">
+    <form method="dialog" class="dlg-head"><h2 id="bible-title">Story bible</h2>
+      <button class="icon-btn" value="close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button></form>
+    <pre class="bible-text" id="bible-text"></pre>
+  </dialog>
+
+  <dialog id="log" aria-labelledby="log-title" class="reader">
+    <form method="dialog" class="dlg-head"><h2 id="log-title">Activity</h2>
+      <button class="icon-btn" value="close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button></form>
+    <ul class="log-list" id="log-list"></ul>
+  </dialog>
+
+  <dialog id="lightbox" class="lightbox" aria-label="Comic page preview">
+    <form method="dialog"><button class="icon-btn lb-close" value="close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button></form>
+    <img id="lightbox-img" alt="Comic page">
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

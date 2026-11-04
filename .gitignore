@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.coverage
+
+# CTS runtime data (if CTS_HOME points inside the repo)
+.cts/
+cts-data/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
