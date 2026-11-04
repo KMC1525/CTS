@@ -25,9 +25,11 @@ is a mistake. Be exact, ordered and complete.
    If the lettering is not in the requested output language, add a faithful translation
    right after each original line.
 4. **Characters.** For every character on the page note visible identity details: hair,
-   eyes, clothing, build, distinguishing marks, apparent age bracket (child, teen, young
-   adult, adult, elder). Reuse the names from the story bible so people stay recognisable
-   from page to page.
+   eyes, clothing, build, distinguishing marks and the apparent age bracket (child, teen, young
+   adult, adult, elder). Separately report the **stated age**: the age the comic itself gives
+   (dialogue, captions, a document, a birthday or school-grade line) or `not stated`. Reuse the names
+   from the story bible so people stay recognisable from page to page, and reuse the ages the bible
+   already records.
 5. **Mood and pacing.** Name the emotional beat of the page and how the layout controls
    tempo (dense small panels = tension, one big panel = impact or awe).
 6. **Continuity cues.** Note anything that connects to earlier or later pages: a repeated
@@ -60,22 +62,28 @@ PANELS:
    - <speaker> (<speech|thought|whisper|shout|narration|sfx|sign>): "<verbatim text>" [translation: "<...>"]
 2. ...
 CHARACTERS ON PAGE:
-- <name or label>: <hair, eyes, clothes, build, marks, apparent age bracket>
+- <name or label>: <hair, eyes, clothes, build, marks>; APPARENT AGE: <child | teen | young adult | adult | elder>; STATED AGE: <number | adult | minor | not stated>
 MOOD AND PACING: <one or two sentences>
 CONTINUITY CUES: <bullets, or "none">
 FLAGS:
 sexual_content: <none | suggestive | explicit>
-minor_involved: <no | yes | unclear>
+minor_involved: <no | yes>
+minor_evidence: <none | NAME - what the comic says>
 violence: <none | mild | graphic>
 ```
 
-### Flag definitions (be conservative - when in doubt, flag it)
+### Flag definitions
 
 - `sexual_content`: `none` = nothing sexual; `suggestive` = nudity, fan-service framing,
-  innuendo, kissing with sexual intent; `explicit` = sexual acts or explicit genitalia.
-- `minor_involved`: `yes` if ANY character on the page is stated to be, or is drawn as,
-  under 18 - judge by how the character LOOKS and is portrayed (childlike proportions,
-  school-age setting, youthful features), NOT by a claimed age or fictional lore
-  ("actually 500 years old" does not change the answer). `unclear` if you cannot tell.
-  Otherwise `no`.
+  innuendo, kissing with sexual intent; `explicit` = sexual acts or explicit genitalia. When in doubt
+  between two levels, choose the higher one.
+- `minor_involved` follows **what the comic says**, not how the art looks:
+  - `yes` only when the comic makes it clear that a character on the page is under 18: a stated age
+    below 18 (here or recorded in the story bible), a caption or line that calls them a child, kid,
+    minor or teenager, a school grade of elementary / middle / high school with no statement that they
+    are 18 or older, or a person who is unmistakably a young child. Put the character and the
+    evidence in `minor_evidence`.
+  - `no` in every other case: an adult age is stated, or **no age is mentioned at all** (then every
+    character is treated as an adult). Do not decide from drawing style, height, uniforms or words like
+    "girl" and "boy" alone.
 - `violence`: `none`, `mild` (fights, injury without detail), `graphic` (gore, mutilation).

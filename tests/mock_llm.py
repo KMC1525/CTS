@@ -45,6 +45,22 @@ Who followed her?
 none
 """
 
+NOT_COVER = """IS_COVER: no
+COVER_KIND: none
+CONFIDENCE: high
+TITLE: none
+VOLUME: none
+EVIDENCE: A page of panels with speech balloons.
+"""
+
+FRONT_COVER = """IS_COVER: yes
+COVER_KIND: front
+CONFIDENCE: high
+TITLE: Midnight Rooftop
+VOLUME: 1
+EVIDENCE: Large title logo, publisher imprint and a composed key illustration without panels.
+"""
+
 PROSE = "Rain hammered the rooftop. Mira did not turn around. \"I told you not to follow me,\" she said.\n\nThe city glowed below her, indifferent."
 
 
@@ -65,7 +81,7 @@ class MockLLM:
     def role_of(messages: list[dict[str, Any]]) -> str:
         system = " ".join(_text(m.get("content")) for m in messages if m.get("role") == "system")
         first = system.lower()
-        for key, role in (("comic page analyst", "analyst"), ("story keeper", "keeper"),
+        for key, role in (("book cover identifier", "cover"), ("comic page analyst", "analyst"), ("story keeper", "keeper"),
                           ("fiction editor", "editor"), ("literary novelist", "novelist")):
             if key in first:
                 return role
@@ -83,7 +99,7 @@ class MockLLM:
             if self.handler:
                 content = self.handler(role, messages)
             else:
-                content = {"analyst": ANALYSIS, "keeper": BIBLE}.get(role, PROSE)
+                content = {"analyst": ANALYSIS, "keeper": BIBLE, "cover": NOT_COVER}.get(role, PROSE)
             return {
                 "id": "mock", "object": "chat.completion", "created": 0, "model": body.get("model", "mock"),
                 "choices": [{"index": 0, "finish_reason": "stop",

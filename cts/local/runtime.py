@@ -157,6 +157,34 @@ def verify(binary: Path | str, timeout: int = 45) -> tuple[bool, str, int | None
     return False, f"exit code {proc.returncode}: {output[-700:]}", proc.returncode
 
 
+_flags_cache: dict[tuple[str, float], frozenset[str]] = {}
+
+
+def supported_flags(binary: Path | str) -> frozenset[str]:
+    """Command-line flags this llama-server understands (from ``--help``; cached per binary).
+
+    Builds differ a lot: older ones know neither ``--fit`` nor ``--reasoning``, and an unknown flag makes
+    llama-server exit at once. Returns an empty set if the help text cannot be read.
+    """
+    path = Path(binary)
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return frozenset()
+    if key in _flags_cache:
+        return _flags_cache[key]
+    flags: frozenset[str] = frozenset()
+    try:
+        proc = subprocess.run([str(path), "--help"], capture_output=True, text=True, timeout=45, env=runtime_env(path),
+                              cwd=str(path.parent), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
+        text = (proc.stdout or "") + (proc.stderr or "")
+        flags = frozenset(re.findall(r"(?<![\w-])(--?[A-Za-z][\w-]*)", text))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _flags_cache[key] = flags
+    return flags
+
+
 def check() -> dict[str, Any]:
     """Run the installed engine and report whether it works (used by the UI and ``cts doctor``)."""
     info = runtime_info()

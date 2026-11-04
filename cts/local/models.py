@@ -35,6 +35,15 @@ def _save(reg: dict[str, dict[str, Any]]) -> None:
     tmp.replace(_registry_file())
 
 
+def is_gguf(path: Path) -> bool:
+    """A real GGUF file starts with the magic bytes 'GGUF' (a failed download is often an HTML error page)."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
 def model_id(repo: str, quant: str) -> str:
     return re.sub(r"[^\w.\-]+", "_", f"{repo.replace('/', '__')}__{quant}")
 
@@ -131,6 +140,10 @@ def _install_worker(iid: str, repo: str, quant: str, token: str) -> None:
                 download.resolve_url(repo, path), models_dir() / rel, expected_size=sizes.get(path, 0),
                 token=token, on_progress=progress, is_cancelled=cancelled.is_set,
             )
+            if not is_gguf(models_dir() / rel):
+                (models_dir() / rel).unlink(missing_ok=True)
+                raise RuntimeError(f"{path.rsplit('/', 1)[-1]} was downloaded but is not a valid GGUF file "
+                                   "(Hugging Face may have answered with an error page). Try again.")
             done_before += sizes.get(path, 0)
             stored.append(rel)
         entry = {

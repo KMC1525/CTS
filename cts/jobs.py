@@ -17,12 +17,14 @@ from . import llm as llm_mod
 from . import settings as settings_mod
 from . import workspace
 from .local import models as local_models
+from .local import runtime as local_runtime
 from .local.server import LocalServerError, llama
 from .paths import jobs_dir
-from .pipeline.runner import Cancelled, FatalError, RunOptions, VolumeRunner, _public_record, load_record
+from .pipeline import budget
+from .pipeline.runner import AgeHalt, Cancelled, FatalError, RunOptions, VolumeRunner, _public_record, load_record
 
 log = logging.getLogger("cts.jobs")
-TERMINAL = {"done", "failed", "cancelled", "interrupted"}
+TERMINAL = {"done", "failed", "cancelled", "interrupted", "halted"}
 STEPS = ("analyze", "write", "polish", "memory")
 
 
@@ -75,6 +77,13 @@ class Job:
                 self.started = time.time()
             if status in TERMINAL:
                 self.finished = time.time()
+                for v in self.vstate:  # nothing is running any more: do not leave pages/volumes "in progress"
+                    for page in v["pages"].values():
+                        if page["status"] == "running":
+                            page["status"] = "stopped"
+                            page["steps"] = {k: x for k, x in page["steps"].items() if x == "done"}
+                    if v["status"] == "running":
+                        v["status"] = "partial"
         self.emit({"type": "job_status", "status": status, "error": error})
         self.save()
 
@@ -103,8 +112,12 @@ class Job:
             rec = e["record"]
             p = self._page(vol, e["page"])
             p.update(rec)
-            p["steps"] = {s: "done" for s in STEPS}
-            p["status"] = "done" if rec.get("status") == "done" else "failed"
+            if rec.get("status") == "skipped":
+                p["steps"] = {k: v for k, v in p["steps"].items() if k == "cover"}
+                p["status"] = "skipped"
+            else:
+                p["steps"] = {s: "done" for s in STEPS}
+                p["status"] = "done" if rec.get("status") == "done" else "failed"
             if e.get("tokens") is not None:
                 self.tokens = max(self.tokens, e["tokens"])
         elif kind == "page_failed":
@@ -121,11 +134,14 @@ class Job:
             del self.log[:-300]
         elif kind == "activity":
             self.activity = e["message"]
+        elif kind == "age_halt":
+            self.log.append({"ts": e["ts"], "level": "error",
+                             "message": f"Page {e['page']}: stopped by the age rule - {e['evidence']}"})
 
     # -------------------------------------------------------------- snapshots
     def summary(self) -> dict[str, Any]:
         with self.lock:
-            done = sum(1 for v in self.vstate for p in v["pages"].values() if p["status"] == "done")
+            done = sum(1 for v in self.vstate for p in v["pages"].values() if p["status"] in ("done", "skipped"))
             total = sum(v["total"] for v in self.vstate)
             return {
                 "id": self.id, "status": self.status, "error": self.error, "created": self.created,
@@ -140,7 +156,7 @@ class Job:
             for v in self.vstate:
                 pages = [v["pages"][k] for k in sorted(v["pages"])]
                 vols.append({**{k: v[k] for k in ("index", "name", "total", "status", "files", "partial", "bible")},
-                             "pages": pages, "done": sum(1 for p in pages if p["status"] == "done")})
+                             "pages": pages, "done": sum(1 for p in pages if p["status"] in ("done", "skipped"))})
             return {**self.summary(), "options": asdict(self.options), "tokens": self.tokens,
                     "activity": self.activity, "log": list(self.log), "volumes": vols, "seq": len(self.events)}
 
@@ -180,10 +196,11 @@ class Job:
                     continue
                 p = self._page(vi, page)
                 p.update(_public_record(rec))
-                p["steps"] = {s: "done" for s in STEPS} if rec.get("status") == "done" else {}
-                p["status"] = "done" if rec.get("status") == "done" else "failed"
+                status = rec.get("status")
+                p["steps"] = {s: "done" for s in STEPS} if status == "done" else ({"cover": "done"} if status == "skipped" else {})
+                p["status"] = status if status in ("done", "skipped") else "failed"
                 v["bible"] = rec.get("bible_after", v["bible"])
-                done += p["status"] == "done"
+                done += p["status"] in ("done", "skipped")
             out = work / "output"
             if out.is_dir():
                 files = {}
@@ -195,7 +212,7 @@ class Job:
             v["status"] = "done" if v["total"] and done == v["total"] else ("partial" if done else "queued")
 
 
-_STEP_LABEL = {"analyze": "reading the comic page", "write": "writing the draft",
+_STEP_LABEL = {"cover": "checking whether it is a book cover", "analyze": "reading the comic page", "write": "writing the draft",
                "polish": "polishing", "memory": "updating the story bible"}
 
 
@@ -253,6 +270,10 @@ class JobManager:
         job.cancel_event.set()
         if job.status == "queued":
             job.set_status("cancelled")
+        elif job.status == "running" and settings_mod.load().provider_type == "local":
+            # A CPU/GPU generation can take minutes: killing the local server aborts the call right away
+            # (the next job simply starts it again). Hosted calls cannot be aborted and end on their own.
+            threading.Thread(target=llama.stop, daemon=True).start()
 
     def delete(self, job_id: str) -> None:
         import shutil
@@ -282,9 +303,25 @@ class JobManager:
 
     @staticmethod
     def check_ready(settings: settings_mod.Settings) -> None:
+        """Fail early, with a message the user can act on, before anything is queued."""
+        if settings.context_window < budget.MIN_WORKING_CONTEXT:
+            raise llm_mod.ConfigError(
+                f"The context window ({settings.context_window:,} tokens) is too small: CTS needs at least "
+                f"{budget.MIN_WORKING_CONTEXT:,} to fit a comic page, the prompts and the story so far. "
+                "Raise it in Settings.")
         if settings.provider_type == "local":
-            if not settings.local.active_model or not local_models.get_installed(settings.local.active_model):
+            model = local_models.get_installed(settings.local.active_model) if settings.local.active_model else None
+            if not model:
                 raise llm_mod.ConfigError("Install and select a local model in Settings first.")
+            main, projector = local_models.paths_for(model)
+            if projector is None:
+                raise llm_mod.ConfigError("This local model has no vision projector (mmproj), so it cannot read "
+                                          "comic pages. Pick a vision-capable model in Settings.")
+            if not main.is_file() or not projector.is_file():
+                raise llm_mod.ConfigError("The local model's files are missing. Reinstall it in Settings > Local models.")
+            if local_runtime.find_server() is None:
+                raise llm_mod.ConfigError("llama.cpp is not installed yet. Open Settings > Local models and press "
+                                          "'Install llama.cpp'.")
         else:
             llm_mod.resolve_spec(settings)
 
@@ -303,25 +340,48 @@ class JobManager:
             if self._queue.empty():
                 llama.stop()  # free the RAM used by the local model once nothing is waiting
 
+    @staticmethod
+    def _fit_context(job: Job, spec: llm_mod.LLMSpec) -> None:
+        """Use the context the server really has (it can be smaller than what was asked for)."""
+        actual = llama.slot_context
+        if actual and actual < spec.context_window:
+            job.emit({"type": "log", "level": "warn", "message":
+                      f"The local server runs with {actual:,} tokens of context (you asked for "
+                      f"{spec.context_window:,}); CTS adapts to it."})
+            spec.context_window = actual
+        if spec.context_window < budget.MIN_WORKING_CONTEXT:
+            raise LocalServerError(
+                f"The local server only has {spec.context_window:,} tokens of context, but CTS needs at least "
+                f"{budget.MIN_WORKING_CONTEXT:,}. Choose a smaller model/quantization or a model with a longer "
+                "context, and check the RAM available.")
+
     def _run(self, job: Job) -> None:
         job.set_status("running")
         settings = settings_mod.load()
+        recover = None
         try:
             if settings.provider_type == "local":
                 job.emit({"type": "activity", "message": "Starting the local model..."})
-                endpoint = llama.ensure(
-                    settings.local.active_model, settings.context_window,
-                    on_status=lambda m: job.emit({"type": "activity", "message": m}),
-                    should_cancel=job.cancel_event.is_set,
-                )
+                model_id, ctx = settings.local.active_model, settings.context_window
+                status = lambda m: job.emit({"type": "activity", "message": m})  # noqa: E731
+                endpoint = llama.ensure(model_id, ctx, on_status=status, should_cancel=job.cancel_event.is_set)
                 spec = llm_mod.resolve_spec(settings, endpoint)
+                self._fit_context(job, spec)
+
+                def recover(_exc: BaseException) -> bool:  # noqa: F811 - the server died mid-job: start it again
+                    if job.cancel_event.is_set() or llama.endpoint is not None:
+                        return False
+                    new_endpoint = llama.ensure(model_id, ctx, on_status=status, should_cancel=job.cancel_event.is_set)
+                    spec.base_url = new_endpoint
+                    self._fit_context(job, spec)
+                    return True
             else:
                 spec = llm_mod.resolve_spec(settings)
         except (LocalServerError, llm_mod.ConfigError) as exc:
             job.set_status("failed" if not job.cancel_event.is_set() else "cancelled", str(exc))
             return
 
-        runner = VolumeRunner(spec, job.options, job.emit, job.cancel_event.is_set)
+        runner = VolumeRunner(spec, job.options, job.emit, job.cancel_event.is_set, recover=recover)
         bible, prior = "", []
         try:
             for vi, vol in enumerate(job.volumes):
@@ -335,12 +395,15 @@ class JobManager:
                     prior_pages=prior if job.options.carry_bible else [],
                 )
                 bible = result.bible
-                prior = [r["text"] for r in result.records][-12:]
+                prior = [r["text"] for r in result.records if r.get("status") != "skipped"][-12:]
                 job.tokens = runner.tokens
                 job.emit({"type": "volume_done", "volume": vi})
             job.set_status("done")
         except Cancelled:
             job.set_status("cancelled")
+        except AgeHalt as stop:
+            job.tokens = runner.tokens
+            job.set_status("halted", str(stop))
         except FatalError as exc:
             job.set_status("failed", str(exc))
 

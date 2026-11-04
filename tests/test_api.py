@@ -1,5 +1,6 @@
 """HTTP API tests: uploads, jobs, SSE, downloads and the localhost-only guard."""
 import io
+import re
 import json
 import time
 import zipfile
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from cts.server import create_app
-from mock_llm import ANALYSIS, BIBLE, PROSE
+from mock_llm import ANALYSIS, BIBLE, FRONT_COVER, NOT_COVER, PROSE
 
 
 @pytest.fixture
@@ -130,7 +131,7 @@ def test_batch_generation_end_to_end_with_sse_and_downloads(client, mock_llm):
     configure(client, mock)
     v2 = upload(client, "Vol 2.zip", zip_bytes("Vol 2", 2))[0]
     v1 = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 3))[0]
-    job = client.post("/api/jobs", json={"volumes": [v1["id"], v2["id"]], "rating": "sfw", "words_per_page": 120}).json()
+    job = client.post("/api/jobs", json={"volumes": [v1["id"], v2["id"]], "rating": "sfw", "words_per_page": 120, "skip_covers": False}).json()
     jid = job["id"]
 
     events, snapshot = [], None
@@ -287,3 +288,136 @@ def test_runtime_check_endpoint(client, tmp_path, monkeypatch):
     assert res["ok"] and res["origin"] == "env" and "version: 9" in res["detail"]
     state = client.get("/api/local/state").json()["runtime"]
     assert state["installed"] and state["origin"] == "env"
+
+
+# ========================================== v0.3: age rule, covers, preflight ==========================================
+def minor_dossier():
+    return ANALYSIS.replace("sexual_content: none", "sexual_content: explicit").replace(
+        "minor_involved: no", "minor_involved: yes\nminor_evidence: Mira - the caption says she is 15").replace(
+        "- Mira: short black hair, red coat, adult woman", "- Mira: short black hair; APPARENT AGE: teen; STATED AGE: 15")
+
+
+def test_nsfw_job_halts_when_the_comic_shows_a_minor_and_cannot_be_resumed(client, mock_llm):
+    mock = mock_llm(lambda role, msgs: {"analyst": minor_dossier(), "keeper": BIBLE, "cover": NOT_COVER}.get(role, PROSE))
+    configure(client, mock)
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 3))
+    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "rating": "nsfw", "skip_covers": False}).json()["id"]
+    snap = wait_for(client, jid, ("halted", "done", "failed"))
+    assert snap["status"] == "halted" and "under 18" in snap["error"] and "page 1" in snap["error"]
+    assert "SFW edition" in snap["error"] and snap["pages_done"] == 0
+    assert any("age rule" in entry["message"] for entry in snap["log"])
+    assert not any(mock.role_of(q["messages"]) in ("novelist", "editor") for q in mock.requests)
+    assert client.post(f"/api/jobs/{jid}/resume").status_code == 400  # a halted job is final
+    with client.stream("GET", f"/api/jobs/{jid}/events") as stream:  # the event stream ends instead of hanging
+        assert any(line.startswith("event: end") for line in stream.iter_lines())
+    # the same comic in the SFW edition is simply written
+    sfw = client.post("/api/jobs", json={"volumes": [vol["id"]], "rating": "sfw", "skip_covers": False, "words_per_page": 120}).json()["id"]
+    assert wait_for(client, sfw)["status"] == "done"
+    assert client.delete(f"/api/jobs/{jid}").json() == {"ok": True}
+
+
+def test_a_halted_job_survives_a_restart_as_halted(client, mock_llm):
+    from cts import jobs
+
+    mock = mock_llm(lambda role, msgs: {"analyst": minor_dossier(), "keeper": BIBLE}.get(role, PROSE))
+    configure(client, mock)
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 1))
+    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "rating": "nsfw", "skip_covers": False}).json()["id"]
+    wait_for(client, jid, ("halted",))
+    reborn = jobs.JobManager()
+    assert reborn.jobs[jid].status == "halted" and "under 18" in reborn.jobs[jid].error
+
+
+def test_covers_are_skipped_counted_as_finished_and_left_out_of_the_novel(client, mock_llm):
+    def handler(role, msgs):
+        if role == "cover":
+            number = int(re.search(r"Is page (\d+) of", " ".join(m["content"] if isinstance(m["content"], str)
+                                  else " ".join(p.get("text", "") for p in m["content"]) for m in msgs)).group(1))
+            return FRONT_COVER if number == 1 else NOT_COVER
+        return {"analyst": ANALYSIS, "keeper": BIBLE}.get(role, PROSE)
+
+    mock = mock_llm(handler)
+    configure(client, mock)
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 3))
+    job = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120}).json()
+    assert client.get(f"/api/jobs/{job['id']}").json()["options"]["skip_covers"] is True  # on by default
+    snap = wait_for(client, job["id"])
+    assert snap["status"] == "done" and snap["pages_done"] == 3 and snap["pages_total"] == 3
+    pages = {p["index"]: p for p in snap["volumes"][0]["pages"]}
+    assert pages[1]["status"] == "skipped" and pages[1]["cover"]["title"] == "Midnight Rooftop" and pages[2]["status"] == "done"
+    assert snap["volumes"][0]["done"] == 3 and snap["volumes"][0]["status"] == "done"
+    txt = client.get(f"/api/jobs/{job['id']}/volumes/0/download", params={"format": "txt"}).text
+    assert txt.count("--- Page ") == 2 and txt.startswith("MIDNIGHT ROOFTOP")
+    from cts import jobs
+
+    reloaded = jobs.JobManager().jobs[job["id"]]  # skipped pages are restored from disk too
+    assert reloaded.vstate[0]["pages"][1]["status"] == "skipped" and reloaded.summary()["pages_done"] == 3
+
+
+def test_skip_covers_can_be_turned_off(client, mock_llm):
+    mock = mock_llm()
+    configure(client, mock)
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 2))
+    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120, "skip_covers": False}).json()["id"]
+    wait_for(client, jid)
+    assert not any(mock.role_of(q["messages"]) == "cover" for q in mock.requests)
+
+
+def test_a_context_window_below_the_minimum_is_refused_with_advice(client, mock_llm):
+    mock = mock_llm()
+    configure(client, mock)
+    client.put("/api/settings", json={"context_window": 4096})
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 1))
+    r = client.post("/api/jobs", json={"volumes": [vol["id"]]})
+    assert r.status_code == 400 and "too small" in r.json()["detail"] and "8,192" in r.json()["detail"]
+    assert 4096 not in client.get("/api/options").json()["context_presets"]
+
+
+def test_local_job_is_refused_up_front_when_the_engine_or_model_is_not_ready(client, cts_home, monkeypatch):
+    from test_local import install_fake_model
+
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 1))
+    client.put("/api/settings", json={"provider_type": "local", "context_window": 16384})
+    assert "Install and select a local model" in client.post("/api/jobs", json={"volumes": [vol["id"]]}).json()["detail"]
+    entry = install_fake_model(cts_home)
+    client.put("/api/settings", json={"local": {"active_model": entry["id"]}})
+    assert "llama.cpp is not installed" in client.post("/api/jobs", json={"volumes": [vol["id"]]}).json()["detail"]
+    (cts_home / "models" / "o__m" / "m-Q4_K_M.gguf").unlink()
+    assert "files are missing" in client.post("/api/jobs", json={"volumes": [vol["id"]]}).json()["detail"]
+
+
+def test_stop_kills_the_local_engine_so_a_long_generation_ends_at_once(cts_home, monkeypatch):
+    from cts import jobs
+
+    stopped = []
+    monkeypatch.setattr(jobs, "llama", type("L", (), {"stop": staticmethod(lambda: stopped.append(1)), "endpoint": None})())
+    from cts import settings as settings_mod
+
+    manager = jobs.JobManager()
+    job = jobs.Job("abc1234567", jobs.RunOptions(), [{"id": "v", "name": "V", "pages": 1}], "Local")
+    job.status = "running"
+    manager.jobs[job.id] = job
+    settings_mod.update({"provider_type": "frontier"})
+    manager.cancel(job.id)  # hosted providers cannot be aborted: nothing is killed
+    time.sleep(0.2)
+    assert stopped == [] and job.cancel_event.is_set()
+    settings_mod.update({"provider_type": "local"})
+    job.cancel_event.clear()
+    manager.cancel(job.id)
+    time.sleep(0.5)
+    assert stopped == [1]
+
+
+def test_the_context_the_server_really_has_is_what_cts_plans_with(cts_home, monkeypatch):
+    from cts import jobs, llm
+
+    events = []
+    job = jobs.Job("abc1234567", jobs.RunOptions(), [{"id": "v", "name": "V", "pages": 1}], "Local")
+    job.emit = events.append
+    spec = llm.LLMSpec("local", "local", "local", "k", "http://127.0.0.1:1/v1", 32768, 1024)
+    monkeypatch.setattr(jobs, "llama", type("L", (), {"slot_context": 12288})())
+    jobs.JobManager._fit_context(job, spec)
+    assert spec.context_window == 12288 and "12,288" in events[0]["message"]
+    monkeypatch.setattr(jobs, "llama", type("L", (), {"slot_context": 4096})())
+    with pytest.raises(jobs.LocalServerError, match="needs at least 8,192"):
+        jobs.JobManager._fit_context(job, llm.LLMSpec("local", "local", "local", "k", "http://127.0.0.1:1/v1", 32768, 1024))

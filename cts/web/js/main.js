@@ -168,6 +168,7 @@ async function startJob() {
       words_per_page: words,
       language: $('#language').value,
       carry_bible: $('#carry').checked,
+      skip_covers: $('#skip-covers').checked,
     });
     await openJob(job.id);
     refreshHistory();
@@ -198,6 +199,7 @@ async function main() {
   $('#words').value = defaults.words_per_page;
   $('#language').value = defaults.language;
   $('#carry').checked = defaults.carry_story_bible;
+  $('#skip-covers').checked = defaults.skip_covers !== false;
   if (defaults.rating === 'nsfw' && adultConfirmed()) setRating('nsfw');
 
   try {

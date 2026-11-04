@@ -23,13 +23,13 @@ from .jobs import TERMINAL, get_manager
 from .local import catalog as hf_catalog
 from .local import models as local_models
 from .local import runtime as llama_runtime
-from .local.server import LocalServerError, llama
+from .local.server import LocalServerError, cleanup_orphan, llama
 from .paths import WEB_DIR, data_dir, state_file
 from .pipeline.runner import RunOptions, media_path
 from .pipeline.text import LANGUAGES
 
 DEFAULT_PORT = 8321
-CONTEXT_PRESETS = [4096, 8192, 16384, 32768, 65536, 131072, 262144, 1048576]
+CONTEXT_PRESETS = [8192, 16384, 32768, 65536, 131072, 262144, 1048576]
 MAX_UPLOAD_BYTES = 12 * 1024**3
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 _server: uvicorn.Server | None = None
@@ -46,6 +46,7 @@ class JobIn(BaseModel):
     words_per_page: int = 300
     language: str = "auto"
     carry_bible: bool = True
+    skip_covers: bool = True
 
 
 class InstallIn(BaseModel):
@@ -280,7 +281,7 @@ def create_app() -> FastAPI:
         try:
             job = get_manager().create(
                 body.volumes,
-                RunOptions(body.rating, body.words_per_page, body.language, body.carry_bible),
+                RunOptions(body.rating, body.words_per_page, body.language, body.carry_bible, body.skip_covers),
             )
         except (llm_mod.ConfigError, ValueError) as exc:
             raise HTTPException(400, str(exc))
@@ -402,6 +403,8 @@ def serve(host: str = "127.0.0.1", port: int | None = None, open_browser: bool =
     url = f"http://localhost:{chosen}"
     config = uvicorn.Config(app, host=host, port=chosen, log_level="warning")
     _server = uvicorn.Server(config)
+    if cleanup_orphan():
+        print("Stopped a local model server left over from a previous run.", flush=True)
     state_file().write_text(json.dumps({"pid": os.getpid(), "port": chosen, "url": url}), encoding="utf-8")
     if open_browser:
         threading.Timer(1.2, _open_browser, args=(url,)).start()

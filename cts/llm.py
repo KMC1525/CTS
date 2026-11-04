@@ -15,6 +15,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from . import settings as settings_mod
 from .paths import subdir
@@ -64,9 +65,34 @@ def resolve_spec(settings: settings_mod.Settings, local_endpoint: str | None = N
     return LLMSpec("frontier", pid, model, key or "not-needed", base_url, ctx, 1568)
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def is_loopback(url: str | None) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host in LOOPBACK_HOSTS or host.startswith("127.")
+
+
+def bypass_proxy_for_loopback() -> None:
+    """Never send traffic to this computer through a proxy.
+
+    The HTTP clients used here (httpx, the OpenAI SDK) obey ``HTTP_PROXY``/``HTTPS_PROXY``. On a network that
+    sets one without ``NO_PROXY`` for localhost, requests to the local llama-server would go to the proxy
+    and fail or time out.
+    """
+    for var in ("NO_PROXY", "no_proxy"):
+        items = [x.strip() for x in os.environ.get(var, "").split(",") if x.strip()]
+        for host in LOOPBACK_HOSTS:
+            if host not in items:
+                items.append(host)
+        os.environ[var] = ",".join(items)
+
+
 def build_llm(spec: LLMSpec, *, temperature: float | None, max_tokens: int, timeout: int = 900) -> Any:
     """Create a CrewAI ``LLM`` for the given spec."""
     os.environ.setdefault("CREWAI_STORAGE_DIR", str(subdir("crewai")))
+    if spec.kind == "local" or is_loopback(spec.base_url):
+        bypass_proxy_for_loopback()
     from crewai import LLM
 
     if spec.kind == "local":
@@ -163,6 +189,12 @@ def ensure_vision_hook() -> None:
 
 
 # ------------------------------------------------------------------------- errors
+# llama-server answers with these when a request cannot work however often it is repeated.
+_CONTEXT_OVERFLOW = ("exceed_context_size", "exceeds the available context size", "larger than the max context size",
+                     "context length exceeded", "maximum context length", "context_length_exceeded")
+_NO_VISION = ("image input is not supported", "does not support image", "does not support vision",
+              "vision is not supported", "multimodal is not supported")
+
 _FATAL_HINTS = (
     "401", "403", "invalid api key", "invalid_api_key", "incorrect api key", "authentication",
     "permission", "unauthorized", "not_found_error", "model_not_found", "does not exist",
@@ -174,6 +206,12 @@ def describe_error(exc: BaseException) -> tuple[str, bool]:
     """Return (friendly message, fatal?). Fatal errors will not go away by retrying."""
     text = f"{type(exc).__name__}: {exc}".strip()
     lowered = text.lower()
+    if any(h in lowered for h in _CONTEXT_OVERFLOW):
+        return (text[:400] + "\n-> The request does not fit in the model's context window. Raise the context window in "
+                "Settings (and make sure the model/server really has it), or use a lighter quantization.", True)
+    if any(h in lowered for h in _NO_VISION):
+        return (text[:400] + "\n-> This model cannot read images. Choose a vision-capable model (a local model needs "
+                "its mmproj file).", True)
     fatal = any(h in lowered for h in _FATAL_HINTS) or isinstance(exc, ConfigError)
     if "image" in lowered and ("support" in lowered or "vision" in lowered or "multimodal" in lowered):
         text += "  (This model may not support images - choose a vision-capable model.)"

@@ -2,7 +2,7 @@
 
 **CTS turns comic volumes into novels.** Drop a folder or ZIP of comic pages, and a team of AI agents reads every page, writes it as prose, edits it, and keeps the story consistent from the first page to the last - producing a complete novel in either an **SFW** or an **NSFW** edition.
 
-- **One comic page = one novel page.** Pacing, order and dialogue stay faithful to the original.
+- **One comic page = one novel page.** Pacing, order and dialogue stay faithful to the original. Book covers are recognised and **skipped** - a cover is packaging, not story.
 - **Multi-step agents** built with [CrewAI](https://github.com/crewAIInc/crewAI): *Read → Write → Polish → Remember* for every page.
 - **Bring your own AI:** frontier models (Claude, ChatGPT, Grok, Gemini, OpenRouter, any OpenAI-compatible endpoint) **or** local GGUF models from Hugging Face, with the quantization of your choice.
 - **Batch mode:** attach several volumes and CTS writes them one after another (volume 1, then 2, then 3...), carrying names and plot between volumes.
@@ -10,7 +10,7 @@
 - **A clean, dark web UI** (plain HTML, CSS and JavaScript - no build step) that runs locally on your computer.
 - **Private by default:** everything runs on your machine; CrewAI telemetry is switched off. Comic pages only leave your computer if *you* pick a hosted AI provider.
 
-> **Status: v0.2 (early release).** The pipeline, UI and Linux installer have been exercised end to end, and the llama.cpp installer is covered by tests that simulate GitHub releases. The Windows and macOS installers follow the same design but have not been verified on real machines yet - please [open an issue](https://github.com/KMC1525/CTS/issues) if anything misbehaves. See the [changelog](CHANGELOG.md) for what is new.
+> **Status: v0.3 (early release).** The pipeline, UI and Linux installer have been exercised end to end, and the llama.cpp installer and the connection to the local engine are covered by tests that simulate GitHub releases and a llama-server. The Windows and macOS installers follow the same design but have not been verified on real machines yet - please [open an issue](https://github.com/KMC1525/CTS/issues) if anything misbehaves. See the [changelog](CHANGELOG.md) for what is new.
 
 ---
 
@@ -73,9 +73,12 @@ Run the same install command again, or run `cts update`. An update **reinstalls 
 ```mermaid
 flowchart LR
     A[Folder / ZIP / CBZ] --> B[Pages in reading order]
-    B --> C["Read<br/>Comic Page Analyst (vision)"]
-    C --> D{Age and rating gate<br/>plain code}
-    D --> E["Write<br/>Novelist"]
+    B --> K{"Cover?<br/>Cover Identifier (vision)<br/>first and last pages"}
+    K -->|yes| X[Skipped - no novel page]
+    K -->|no| C["Read<br/>Comic Page Analyst (vision)"]
+    C --> D{"Age rule (NSFW)<br/>plain code"}
+    D -->|clearly under 18| S[Process stops]
+    D -->|otherwise| E["Write<br/>Novelist"]
     E --> F["Polish<br/>Editor"]
     F --> G["Remember<br/>Story Keeper"]
     G -->|story bible| C
@@ -83,11 +86,12 @@ flowchart LR
     F --> H[TXT / DOCX / PDF]
 ```
 
-For **every page**, CTS runs three small CrewAI crews:
+For **every page**, CTS runs small CrewAI crews (the first step only on the first and last pages of a volume):
 
 | Step | Agent | What it does |
 | --- | --- | --- |
-| **Read** | Comic Page Analyst | Looks at the page image: reading order (including right-to-left manga), every panel, all dialogue and captions verbatim, characters, mood - plus safety flags. |
+| **Cover?** | Cover Identifier | Looks at the first two and last two pages of each volume and decides whether one is a book cover (front, back, spine, jacket) - see [Covers](#covers). |
+| **Read** | Comic Page Analyst | Looks at the page image: reading order (including right-to-left manga), every panel, all dialogue and captions verbatim, characters and the ages the comic states, mood - plus safety flags. |
 | **Write** | Novelist | Writes exactly one page of prose from the analysis, the **story bible** and the most recent novel pages. |
 | **Polish** | Editor | Checks fidelity against the analysis, continuity, style and the word budget. Over-long pages are condensed. |
 | **Remember** | Story Keeper | Updates the **story bible** (voice, characters, places, plot so far, open threads) so the next page - and the next volume - stays consistent. |
@@ -100,7 +104,7 @@ Progress is saved page by page, so an interrupted job can be **resumed** without
 
 | Window | Notes |
 | --- | --- |
-| 8K | Practical minimum. Little memory of previous pages. |
+| 8K | The minimum CTS accepts (a page image, the prompts and the answer must fit). Little memory of previous pages. |
 | 16K-32K | Good default for local models and most pages. |
 | 64K+ | Best continuity; use with hosted models or lots of memory. |
 
@@ -108,7 +112,13 @@ Progress is saved page by page, so an interrupted job can be **resumed** without
 
 - **SFW** keeps romance and tension but closes the door on sexual scenes and avoids gratuitous gore.
 - **NSFW** is an adults-only edition: where the comic shows or implies sexual content between **adult** characters, it is written fully.
-- **Age guard (always on).** The analyst flags whether any character is, or looks like, a minor. A page that has sexual content **and** may involve a minor - or whose safety flags are missing - is *always* written without sexual content, regardless of the selected edition. This check is plain code, not a prompt a model could talk its way around. It relies on the model's reading of the page, so no automated check is perfect: review your output.
+- **Age rule (NSFW edition) - the comic decides.** A character's age is taken from what the comic itself says, never from drawing style:
+  - the comic makes it **clear that a character is under 18** (an age below 18 in dialogue, a caption or a document; the story calling them a child, kid, minor or teenager; a school grade below university with no statement that they are 18+; or someone who is unmistakably a young child) -> **the whole process stops.** Nothing is written for that page, the pages before it are kept as a partial novel, and the message tells you which character and why. Generate the SFW edition instead;
+  - the comic makes it clear that the character is **18 or older** -> generation continues;
+  - the comic **does not mention ages** -> everyone is treated as an adult and generation continues.
+
+  The check has two layers: the analyst reports each character's *stated* age and a `minor_involved` flag, and plain code (not a prompt a model could talk its way around) stops the process on a stated age below 18 or on that flag; the NSFW prompt also tells the writing model to stop with a `[[CTS-STOP-MINOR]]` answer if it meets such a character. A character established as a minor on one page stays a minor on later pages. The SFW edition does not apply this rule. It relies on the model's reading of the page, so no automated check is perfect: review your output.
+- If the analyst does not return its safety flags for a page that may be sexual, the page is written in SFW terms instead of guessing.
 - Hosted providers may **decline** NSFW pages. CTS detects a refusal, falls back to the SFW version of that page, and tells you. **Local models are the most reliable choice for the NSFW edition.**
 
 ### Input
@@ -117,9 +127,13 @@ Progress is saved page by page, so an interrupted job can be **resumed** without
 - If a folder/ZIP contains several sub-folders named like volumes (`Vol 1`, `Volume 02`, `v3`, `Tome 4`...) and no pages of its own, each sub-folder becomes its own volume.
 - Volumes are generated in the order shown in the zip box - use the arrows to reorder.
 
+### Covers
+
+The `cover-identify` prompt (see [`cts/prompts/`](cts/prompts)) checks the **first two and last two pages** of every volume with one short vision call each and decides whether the page is a book cover: front, back, spine, flap or wrap-around, recognised by title lettering, publisher or imprint, barcode, blurb and the absence of panels. **A cover is skipped: no analysis, no novel page.** The check is deliberately conservative (it must be at least medium-confident, and a real story page is never dropped on a guess); chapter title pages, splash pages and advertisements are not covers. If the title is printed on a front cover, it becomes the title of the exported novel. Turn it off with *Skip book covers* under the novel options.
+
 ### Output
 
-Each volume produces a `TXT`, `DOCX` and `PDF`: a title page, then one novel page per comic page on 6 x 9 in pages (long pages shrink slightly to stay on one page). Files live in your CTS data folder (`cts info` shows where) and are also available from the download buttons.
+Each volume produces a `TXT`, `DOCX` and `PDF`: a title page, then one novel page per story page of the comic (covers are left out and the novel pages are numbered 1, 2, 3...) on 6 x 9 in pages (long pages shrink slightly to stay on one page). Files live in your CTS data folder (`cts info` shows where) and are also available from the download buttons.
 
 ---
 
@@ -150,6 +164,18 @@ CTS runs local models with [llama.cpp](https://github.com/ggml-org/llama.cpp)'s 
 4. Press **Install**. The model and its vision projector (`mmproj`) are downloaded with progress, and the download resumes if interrupted.
 
 The model must be **vision-capable** (a repository that ships an `mmproj` file) or it cannot read comic pages. Gated models need a Hugging Face token (*Settings → Local models*).
+
+### How CTS talks to the local engine
+
+Most problems with local models happen between the app and the engine, so CTS checks and handles these for you:
+
+- **Files first:** the model and its vision projector must exist and be real GGUF files (a failed download is often an HTML error page).
+- **Sized to your machine:** on current llama.cpp builds CTS lets the engine fit the model into the memory you have (`--fit`) instead of forcing every layer onto the GPU, and turns off "thinking" (`--reasoning off`) so a reasoning model cannot spend the whole answer on hidden thoughts and return an empty page. Flags an older build does not know are never passed.
+- **Verified after start:** CTS asks the running server (`/props`) whether vision really loaded and how much context it really has, and plans with that number - not with what you asked for.
+- **Never through a proxy:** traffic to `127.0.0.1` ignores `HTTP_PROXY` / `ALL_PROXY` (and `NO_PROXY` is extended), so a company proxy cannot break the connection.
+- **Self-healing:** if the engine dies in the middle of a generation (out of memory, killed), CTS restarts it and retries the page. **Stop** also stops the engine at once so a long generation does not keep running; **Quit** and deleting a model no longer wait for a model that is still loading; and an engine left behind by a crashed CTS is cleaned up on the next start.
+- **Clear errors:** a request that does not fit the context window, or a model that cannot read images, is reported with what to change instead of being retried.
+- **Checked before queueing:** a job is refused up front, with a message, if the engine is not installed, the model files are missing or the context window is below 8K.
 
 ### The llama.cpp engine
 

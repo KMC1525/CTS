@@ -309,7 +309,7 @@ async function save() {
   else if (clearKey) patch.frontier.api_keys[pid] = '';
   const token = $('#l-token').value.trim();
   if (token) patch.local.hf_token = token;
-  if (!(patch.context_window >= 2048)) { toast('The context window must be at least 2048 tokens.', 'err'); return false; }
+  if (!(patch.context_window >= 8192)) { toast('The context window must be at least 8192 tokens - CTS needs room for the page image, the prompts and the story so far.', 'err'); return false; }
   try {
     settings = await api.put('/api/settings', patch);
     clearKey = false;

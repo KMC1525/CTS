@@ -98,3 +98,41 @@ def test_error_classification():
 
 def test_language_instruction():
     assert "lettering" in language_instruction("auto") and language_instruction("French") == "French"
+
+
+# ---------------------------------------------------------------- v0.3: local connection
+def test_local_requests_bypass_http_proxies(mock_llm, monkeypatch):
+    """Reproduces: with HTTP_PROXY set (and no NO_PROXY) every call to the engine on 127.0.0.1 went to the proxy."""
+    from conftest import local_spec
+
+    mock = mock_llm()
+    for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.setenv(var, "http://127.0.0.1:9")  # a proxy that does not exist
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    reply = llm.test_connection(local_spec(mock))
+    assert reply == "Rain hammered the rooftop. Mira did not turn around. \"I told you not to follow me,\" she said.\n\nThe city glowed below her, indifferent."[:120]
+    assert {"127.0.0.1", "localhost"} <= set(os.environ["NO_PROXY"].split(","))
+
+
+def test_proxy_bypass_keeps_existing_entries_and_only_applies_to_loopback(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "intranet.example")
+    llm.bypass_proxy_for_loopback()
+    assert os.environ["NO_PROXY"].split(",")[0] == "intranet.example" and "::1" in os.environ["NO_PROXY"]
+    assert llm.is_loopback("http://127.0.0.1:8080/v1") and llm.is_loopback("http://localhost:1234") and llm.is_loopback("http://[::1]:1/v1")
+    assert not llm.is_loopback("https://api.openai.com/v1") and not llm.is_loopback(None)
+
+
+@pytest.mark.parametrize("message,needle", [
+    ("Error code: 400 - {'error': {'code': 400, 'message': 'request (9123 tokens) exceeds the available context size (8192 tokens), try increasing it', 'type': 'exceed_context_size_error'}}", "context window"),
+    ("input (9000 tokens) is larger than the max context size (8192 tokens). skipping", "context window"),
+    ("Error code: 500 - image input is not supported - hint: if this is unexpected, you may need to provide the mmproj", "cannot read images"),
+])
+def test_llama_cpp_errors_that_retrying_cannot_fix_are_fatal_with_advice(message, needle):
+    text, fatal = llm.describe_error(RuntimeError(message))
+    assert fatal and needle in text
+
+
+def test_transient_local_errors_stay_retryable():
+    for message in ("Connection error.", "Error code: 503 - Loading model", "Server disconnected without sending a response"):
+        assert llm.describe_error(RuntimeError(message))[1] is False

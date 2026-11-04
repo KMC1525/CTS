@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 PAGE_TYPES = ("story", "splash", "cover", "title", "credits", "advertisement", "extras", "blank")
 
@@ -47,25 +47,27 @@ def word_count(text: str) -> int:
 
 
 # ------------------------------------------------------------------- safety flags
-_MINOR_WORDS = re.compile(
-    r"\b(child|children|kid|kids|teen|teens|teenage|teenager|teenagers|adolescent|preteen|underage|"
-    r"minor|minors|schoolgirl|schoolboy|school uniform|toddler|infant|loli|lolicon|shota|"
-    r"childlike|child-like|juvenile)\b",
-    re.I,
-)
+STOP_MINOR = "[[CTS-STOP-MINOR]]"  # what the NSFW prompts tell the model to answer when the comic shows a minor
+
+
+def stop_requested(text: str) -> bool:
+    return STOP_MINOR in (text or "")
 
 
 @dataclass
 class Flags:
     page_type: str = "story"
     sexual_content: str = "unknown"  # none | suggestive | explicit | unknown
-    minor_involved: str = "unclear"  # no | yes | unclear
+    minor_involved: str = "no"  # yes | no  (yes only when the COMIC makes it clear; see rating_nsfw.md)
+    minor_evidence: str = ""
     violence: str = "unknown"
     complete: bool = False  # True when the analyst returned the FLAGS block
+    characters: list[str] = field(default_factory=list)  # names listed on the page
+    minor_names: list[str] = field(default_factory=list)  # characters whose STATED AGE is under 18
 
     @property
-    def minor_signal(self) -> bool:
-        return self.minor_involved != "no"
+    def minor_clear(self) -> bool:
+        return self.minor_involved == "yes" or bool(self.minor_names)
 
 
 def _flag(pattern: str, text: str, allowed: tuple[str, ...]) -> str | None:
@@ -73,6 +75,22 @@ def _flag(pattern: str, text: str, allowed: tuple[str, ...]) -> str | None:
     if m and m.group(1).lower() in allowed:
         return m.group(1).lower()
     return None
+
+
+_SECTION = re.compile(r"CHARACTERS ON PAGE\s*:(.*?)(?:\n[A-Z][A-Z ]{3,}:|\Z)", re.S)
+_CHAR_LINE = re.compile(r"^\s*[-*\u2022]\s*\**([^:\n]+?)\**\s*:(.*)$", re.M)
+_STATED_AGE = re.compile(r"STATED AGE\s*:\s*\**\s*([^;\n|]+)", re.I)
+
+
+def _stated_is_minor(value: str) -> bool:
+    """True when the STATED AGE the analyst copied from the comic is clearly under 18."""
+    value = value.strip().lower()
+    if re.search(r"\bnot stated\b|\bunknown\b|\bn/a\b", value):
+        return False
+    if re.search(r"\bminor\b|\bunderage\b|\bunder\s*\d{1,2}\b|\bchild\b|\bkid\b|\bteen", value):
+        return True  # checked first: in "under 18" the number is a limit, not an age
+    number = re.search(r"\b(\d{1,2})\b", value)
+    return bool(number) and int(number.group(1)) < 18
 
 
 def parse_flags(dossier: str) -> Flags:
@@ -86,24 +104,51 @@ def parse_flags(dossier: str) -> Flags:
     if sexual:
         flags.sexual_content = sexual
     if minor:
-        flags.minor_involved = minor
+        flags.minor_involved = "yes" if minor == "yes" else "no"  # "unclear" = the comic did not make it clear
     if violence:
         flags.violence = violence
     flags.complete = bool(sexual and minor)
-    # Belt and braces: the dossier's own character descriptions can reveal a young character
-    # the flag missed. Only the CHARACTERS section is scanned to avoid false alarms.
-    chars = re.search(r"CHARACTERS ON PAGE\s*:(.*?)(?:\n[A-Z][A-Z ]{3,}:|\Z)", dossier, re.S)
-    if chars and _MINOR_WORDS.search(chars.group(1)) and flags.minor_involved == "no":
-        flags.minor_involved = "unclear"
+    ev = re.search(r"minor_evidence\s*[:=]\s*(.+)", dossier, re.I)
+    if ev and ev.group(1).strip().lower().strip("*`\"'. ") not in ("", "none", "n/a", "no"):
+        flags.minor_evidence = ev.group(1).strip().strip("*`")[:240]
+    section = _SECTION.search(dossier)
+    if section:
+        for line in _CHAR_LINE.finditer(section.group(1)):
+            name, rest = line.group(1).strip(), line.group(2)
+            flags.characters.append(name)
+            stated = _STATED_AGE.search(rest)
+            if stated and _stated_is_minor(stated.group(1)):
+                flags.minor_names.append(name)
     return flags
 
 
-def decide_rating(requested: str, flags: Flags) -> tuple[str, str | None]:
-    """Return (rating to use for this page, note if it was forced down to SFW).
+def minor_evidence(flags: Flags, known_minors: set[str] | None = None) -> str | None:
+    """Why this page must stop the NSFW edition, or None. Only what the COMIC makes clear counts.
 
-    The age guard is enforced here in code, independent of what any model decides: a page
-    that may involve a minor AND has any sexual content - or whose flags are missing - is
-    never written in the adult edition.
+    * the analyst flagged ``minor_involved: yes`` (stated age under 18, called a child/teen/minor, school
+      grade, unmistakably a young child), or
+    * a character's STATED AGE (copied from the comic) is under 18, or
+    * a character who was established as a minor on an earlier page appears again.
+    Characters whose age is not mentioned are adults, and drawing style alone never decides.
+    """
+    if flags.minor_involved == "yes":
+        return flags.minor_evidence or "the comic makes it clear that a character is under 18"
+    if flags.minor_names:
+        return f"{', '.join(flags.minor_names)}: stated age under 18"
+    if known_minors:
+        again = [c for c in flags.characters if c.strip().lower() in known_minors]
+        if again:
+            return f"{', '.join(again)} was established as under 18 earlier in the story"
+    return None
+
+
+def decide_rating(requested: str, flags: Flags) -> tuple[str, str | None]:
+    """Return (rating to use for this page, note if it was lowered to SFW).
+
+    Pages with a clearly under-18 character never get here in the NSFW edition (they halt the process
+    first, see ``minor_evidence``). What is left is a safety net for a malfunctioning analyst: if the
+    page may be sexual but the analyst did not return its flags, nothing can be verified, so the page
+    is written in SFW terms.
     """
     if requested != "nsfw":
         return "sfw", None
@@ -111,9 +156,38 @@ def decide_rating(requested: str, flags: Flags) -> tuple[str, str | None]:
         return "nsfw", None
     if not flags.complete:
         return "sfw", "The analyst did not return safety flags, so this page was written in SFW terms."
-    if flags.minor_signal:
-        return "sfw", "Age guard: a character may be a minor, so this page was written without sexual content."
     return "nsfw", None
+
+
+# ------------------------------------------------------------------------ covers
+@dataclass
+class CoverInfo:
+    is_cover: bool = False  # yes AND not a low-confidence guess
+    kind: str = "none"
+    confidence: str = "low"
+    title: str = ""
+    volume: str = ""
+    evidence: str = ""
+    answered_yes: bool = False
+
+
+def _field(name: str, text: str) -> str:
+    m = re.search(rf"^\s*\**{name}\**\s*[:=]\s*(.+)$", text, re.I | re.M)
+    return m.group(1).strip().strip("*`\"' ") if m else ""
+
+
+def parse_cover(text: str) -> CoverInfo:
+    info = CoverInfo()
+    info.answered_yes = _field("IS_COVER", text).lower().startswith("yes")
+    kind = _field("COVER_KIND", text).lower()
+    info.kind = kind if kind in ("front", "back", "spine", "inside", "wrap-around") else "none"
+    conf = _field("CONFIDENCE", text).lower()
+    info.confidence = conf if conf in ("high", "medium", "low") else "low"
+    for attr, key in (("title", "TITLE"), ("volume", "VOLUME"), ("evidence", "EVIDENCE")):
+        value = _field(key, text)
+        setattr(info, attr, "" if value.lower() in ("none", "n/a", "") else value[:160])
+    info.is_cover = info.answered_yes and info.confidence != "low"
+    return info
 
 
 # ----------------------------------------------------------------------- refusals

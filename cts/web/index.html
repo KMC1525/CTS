@@ -86,6 +86,10 @@
           <input type="checkbox" id="carry" checked>
           <span>Keep names and story consistent across volumes</span>
         </label>
+        <label class="check">
+          <input type="checkbox" id="skip-covers" checked>
+          <span>Skip book covers (a cover never becomes a novel page)</span>
+        </label>
         <button type="button" class="primary" id="start" disabled>
           <svg class="icon"><use href="#i-sparkle"/></svg><span>Generate novel</span>
         </button>
@@ -230,10 +234,10 @@
         <h3>Context window</h3>
         <div class="field-row">
           <label class="field"><span class="label">Size (tokens)</span><select id="ctx"></select></label>
-          <label class="field" id="ctx-custom-field" hidden><span class="label">Custom</span><input type="number" id="ctx-custom" min="2048" step="1024"></label>
+          <label class="field" id="ctx-custom-field" hidden><span class="label">Custom</span><input type="number" id="ctx-custom" min="8192" step="1024"></label>
         </div>
         <p class="hint">How much text the model can hold at once. Larger windows let CTS feed more of the story-so-far to each page
-        (better continuity) but need more memory with local models. 16K-32K is a good start; 8K is the practical minimum.</p>
+        (better continuity) but need more memory with local models. 16K-32K is a good start; CTS needs at least 8K.</p>
       </section>
 
       <section class="card">

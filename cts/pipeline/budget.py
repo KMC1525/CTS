@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 
+# Reading a comic page needs room for the page image (~1-2K tokens), the system prompts, the story bible and
+# the answer. Below this a request cannot fit and every page would fail.
+MIN_WORKING_CONTEXT = 8192
+
+
 def estimate_tokens(text: str) -> int:
     """Cheap, slightly pessimistic token estimate (works across languages and providers)."""
     return max(1, int(len(text) / 3.3))

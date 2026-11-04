@@ -122,6 +122,23 @@ class Steps:
         outputs, tokens = _run([agent], [task])
         return StepOutput(clean_document(outputs[0]), tokens)
 
+    # ------------------------------------------------------------ 0. cover check
+    def identify_cover(self, ctx: PageContext, image_token: str) -> StepOutput:
+        """Is this page a book cover? (prompt: cover-identify.md). A short, cheap vision call."""
+        llm = self._llm(0.1, 500)
+        agent = _agent(["cover-identify"], llm)
+        position = ("the FIRST pages of the volume" if ctx.index <= 3 else "the LAST pages of the volume"
+                    if ctx.index > ctx.total - 3 else "the middle of the volume")
+        description = (
+            f"Is page {ctx.index} of {ctx.total} of the comic volume \"{ctx.volume_name}\" a book cover?\n"
+            f"{llm_mod.image_marker(image_token)}\n\n"
+            f"Hint (not proof): this page is among {position}.\n"
+            "Follow your output format exactly."
+        )
+        task = _task(description, "The cover verdict in the required six-line format.", agent)
+        outputs, tokens = _run([agent], [task])
+        return StepOutput(clean_document(outputs[0]), tokens)
+
     # ------------------------------------------------------------ 2+3. write, polish
     def write_and_polish(
         self, ctx: PageContext, dossier: str, rating: str, safety_note: str | None,
@@ -133,9 +150,8 @@ class Steps:
         editor = _agent(["editor", rating_prompt], self._llm(0.4, cap))
         limit = int(ctx.words_per_page * 1.25)
         safety = (
-            "\nSAFETY OVERRIDE FOR THIS PAGE: a character on this page may be a minor. Write the scene "
-            "WITHOUT any sexual or suggestive content: no nudity described, no desire, no touching with "
-            "sexual intent. Cut away or keep it plainly non-sexual and continue the plot.\n"
+            "\nSAFETY NOTE FOR THIS PAGE: its content flags are unavailable, so write it in SFW terms: no "
+            "explicit sexual content, no graphic detail. Keep every event of the page.\n"
             if safety_note else ""
         )
 

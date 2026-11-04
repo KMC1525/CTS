@@ -5,6 +5,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 To update an existing installation, run the install command again or run `cts update` (see the [README](README.md#updating)).
 
+## 0.3.0 - 2026-11-04
+
+### Added
+- **`cover-identify` system prompt and Cover Identifier agent** (`cts/prompts/cover-identify.md`). On the first two and last two pages of every volume, one short vision call decides whether the page is a book cover (front, back, spine, flap, wrap-around). **A cover is skipped: it is not analysed and no novel page is written from it.** The verdict must be at least medium-confidence, so a real story page is never dropped on a guess; chapter title pages, splash pages and advertisements are not covers. If the analyst itself classifies a page near the start or end of the volume as a cover, it is skipped too. A title printed on a front cover becomes the title of the exported novel.
+- **Skip book covers** option (on by default; `skip_covers` in the API) and a "skipped" card in the story box that shows the detected cover and its title. Skipped pages count as finished, are saved in the checkpoint and are replayed on resume.
+- **New job status `halted`** ("stopped by age rule") with the character and the reason; a halted job keeps the pages written before it as a partial novel and cannot be resumed.
+- **Local engine start-up checks:** the model and `mmproj` files are verified to be real GGUF files (before starting, and right after downloading); `/props` confirms that vision really loaded and reports the context the server really has.
+- **Pre-flight checks** when a job is created: engine installed, model files present, vision projector present, context window of at least 8,192 tokens - each with a message that says what to do.
+- Tests for all of the above, including regression tests that reproduce each local-connection problem below.
+
+### Changed
+- **NSFW age rule (as requested).** The comic decides: if it makes clear that a character is **under 18**, the whole process **stops** (the NSFW prompt tells the model to answer `[[CTS-STOP-MINOR]]`, and plain code stops on a stated age below 18 or on the analyst's `minor_involved: yes`; a character established as a minor on one page stays a minor later); if it makes clear the character is **18 or older**, or **does not mention ages**, generation **continues** and everyone is treated as an adult. Previously a page with possible minors was silently rewritten in SFW terms, judged partly by how characters look. Characters who merely *look* young but whose age is not mentioned now continue in the NSFW edition, as specified; a character who is unmistakably a young child still counts as clearly under 18. The SFW edition does not apply the rule.
+- The analyst's page description now reports each character's **stated age** separately from the apparent age, and the story bible records ages only as the comic states them (`minor`, `adult`, a number or `not stated`). `minor_involved` is `yes` or `no` (`unclear` is read as `no`).
+- Exports leave covers out and number the novel pages 1..n.
+- The smallest context window is 8,192 tokens (the 4,096 preset was removed): a comic page, the prompts and the answer do not fit in less.
+
+### Fixed - connection between the local model and CTS
+- **Proxies broke local models.** The health check and the LLM client obeyed `HTTP_PROXY` / `ALL_PROXY`, so on a network with a proxy (and no `NO_PROXY` for localhost) the engine on 127.0.0.1 looked dead or calls timed out. Loopback traffic now never uses a proxy.
+- **Forced `-ngl 99` disabled llama.cpp's automatic memory fit**, so models that did not fit in VRAM failed instead of being adjusted. On builds that support `--fit` CTS no longer passes `-ngl`; older builds still get `-ngl 99`. Flags are detected from `llama-server --help`, and an unknown flag is never passed.
+- **"Thinking" models returned empty pages**: hidden reasoning used the whole answer budget. CTS starts the engine with `--reasoning off` (or `--reasoning-budget 0` on builds without it).
+- **Vision and context were never verified.** A model that started without image support, or with less context than requested, only failed in the middle of a generation. CTS now reads `/props` after start-up, refuses a server without vision, and plans its prompt budgets with the context the server really has.
+- **A dead engine ended the job.** If llama-server died mid-job (out of memory, killed) three pages failed and the job aborted. CTS now restarts the engine and retries; if it cannot, the job stops with the reason.
+- **Quit, model deletion and Stop could hang.** Stopping the engine waited for the loading lock (up to 15 minutes while a model loaded). `stop()` now interrupts a load at once, and pressing **Stop** during a local job stops the engine so a long generation ends immediately.
+- **Orphaned engines.** A `llama-server` left behind by a CTS that was killed kept using RAM. A pid file lets the next start remove it (never a process that is not llama-server).
+- **Port races** between picking a free port and the engine binding it are retried with another port.
+- **Damaged or incomplete model files** (a download that was really an error page, a missing `mmproj`) are caught before starting the engine, with advice, instead of an obscure engine crash.
+- **llama.cpp's own errors were not understood**: a request that exceeds the context window (`exceed_context_size_error`) or an image sent to a model without vision (`image input is not supported`) were retried three times and then reported as a generic failure. They are now recognised as unfixable by retrying and explained.
+- Loading the model now shows elapsed time, and a stale "running" state is no longer left on pages and volumes after a job stops.
+
 ## 0.2.1 - 2026-11-04
 
 ### Fixed

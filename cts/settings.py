@@ -36,6 +36,7 @@ class GenerationDefaults(BaseModel):
     words_per_page: int = 300
     language: str = "auto"
     carry_story_bible: bool = True
+    skip_covers: bool = True
 
 
 class Settings(BaseModel):

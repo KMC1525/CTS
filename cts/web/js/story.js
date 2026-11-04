@@ -8,11 +8,14 @@ const STEPS = [
   ['polish', 'Polish', 'sparkle'],
   ['memory', 'Remember', 'memory'],
 ];
+const COVER_STEP = ['cover', 'Cover?', 'book'];
 const STATUS_LABEL = {
   queued: 'queued', running: 'generating', done: 'finished', failed: 'failed',
-  cancelled: 'stopped', interrupted: 'interrupted',
+  cancelled: 'stopped', interrupted: 'interrupted', halted: 'stopped by age rule',
 };
-const TERMINAL = new Set(['done', 'failed', 'cancelled', 'interrupted']);
+const TERMINAL = new Set(['done', 'failed', 'cancelled', 'interrupted', 'halted']);
+// A page that is finished for progress purposes: written, or deliberately skipped (a book cover).
+const finished = (p) => p.status === 'done' || p.status === 'skipped';
 
 let cur = null; // { id, snap, selected, es, follow, cards: Map }
 let tick = null;
@@ -123,8 +126,17 @@ function applyEvent(e) {
     case 'job_status':
       snap.status = e.status; snap.error = e.error || '';
       if (e.status === 'running' && !snap.started) snap.started = e.ts;
-      if (TERMINAL.has(e.status)) { snap.finished = e.ts; clearInterval(tick); }
-      renderHeader(); renderAlert(); renderStats(); renderTabs();
+      if (TERMINAL.has(e.status)) {
+        snap.finished = e.ts; clearInterval(tick);
+        for (const vol of snap.volumes) {  // nothing is running any more
+          for (const pg of vol.pageMap.values()) {
+            if (pg.status === 'running') { pg.status = 'stopped'; pg.steps = Object.fromEntries(Object.entries(pg.steps || {}).filter(([, x]) => x === 'done')); }
+          }
+          if (vol.status === 'running') vol.status = 'partial';
+        }
+        renderFeed();
+      }
+      renderHeader(); renderAlert(); renderStats(); renderTabs(); renderNow();
       hooks.onStatus(e.status, snap);
       refreshHistory();
       if (e.status === 'done') toast('Your novel is ready - use the download buttons.', 'ok');
@@ -138,11 +150,11 @@ function applyEvent(e) {
     case 'page_done': {
       const p = page(e.volume, e.page);
       Object.assign(p, e.record);
-      p.steps = Object.fromEntries(STEPS.map(([k]) => [k, 'done']));
-      p.status = e.record.status === 'done' ? 'done' : 'failed';
-      v.done = [...v.pageMap.values()].filter((x) => x.status === 'done').length;
+      if (e.record.status === 'skipped') { p.steps = { cover: 'done' }; p.status = 'skipped'; }
+      else { p.steps = Object.fromEntries(STEPS.map(([k]) => [k, 'done'])); p.status = e.record.status === 'done' ? 'done' : 'failed'; }
+      v.done = [...v.pageMap.values()].filter(finished).length;
       if (e.tokens != null) snap.tokens = Math.max(snap.tokens, e.tokens);
-      snap.pages_done = snap.volumes.reduce((n, vol) => n + [...vol.pageMap.values()].filter((x) => x.status === 'done').length, 0);
+      snap.pages_done = snap.volumes.reduce((n, vol) => n + [...vol.pageMap.values()].filter(finished).length, 0);
       break;
     }
     case 'page_failed': { const p = page(e.volume, e.page); p.status = 'failed'; p.error = e.error; break; }
@@ -155,7 +167,7 @@ function applyEvent(e) {
   renderStats(); renderTabs(); renderNow();
 }
 
-const labelFor = (step) => ({ analyze: 'reading the comic page', write: 'writing the draft', polish: 'polishing', memory: 'updating the story bible' }[step]);
+const labelFor = (step) => ({ cover: 'checking whether it is a book cover', analyze: 'reading the comic page', write: 'writing the draft', polish: 'polishing', memory: 'updating the story bible' }[step]);
 
 // ------------------------------------------------------------------- render ---
 function renderAll() {
@@ -189,7 +201,7 @@ function renderStats() {
   if (!cur?.snap) return;
   const s = cur.snap;
   const total = s.volumes.reduce((n, v) => n + v.total, 0);
-  const done = s.volumes.reduce((n, v) => n + [...v.pageMap.values()].filter((p) => p.status === 'done').length, 0);
+  const done = s.volumes.reduce((n, v) => n + [...v.pageMap.values()].filter(finished).length, 0);
   const pct = total ? Math.round((done / total) * 100) : 0;
   const bar = $('#overall-bar');
   bar.firstElementChild.style.width = `${pct}%`;
@@ -217,7 +229,7 @@ function renderTabs() {
   const s = cur.snap;
   box.hidden = s.volumes.length < 2;
   box.replaceChildren(...s.volumes.map((v, i) => {
-    const done = [...v.pageMap.values()].filter((p) => p.status === 'done').length;
+    const done = [...v.pageMap.values()].filter(finished).length;
     const pct = v.total ? (done / v.total) * 100 : 0;
     const state = v.status === 'running' ? 'in progress' : v.status === 'done' ? 'finished' : v.status === 'partial' ? 'partial' : 'waiting';
     const bar = h('div', { class: 'progress slim' }, h('span', { style: { width: `${pct}%` } }));
@@ -239,6 +251,7 @@ function renderNow() {
   if (s.status === 'running' && s.activity) el.replaceChildren(h('span', { class: 'dot' }), s.activity);
   else if (s.status === 'queued') el.replaceChildren(h('span', { class: 'dot' }), 'Waiting for the previous job to finish...');
   else if (s.status === 'done') el.textContent = 'All pages written.';
+  else if (s.status === 'halted') el.textContent = 'Stopped by the age rule - see the message above.';
   else el.textContent = '';
 }
 
@@ -305,21 +318,29 @@ function buildCard(vol, p) {
   shot.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
 
   const body = [];
-  if (p.status === 'done' || (p.status === 'failed' && p.text)) {
+  if (p.status === 'skipped') {
+    const c = p.cover || {};
+    const what = c.kind && c.kind !== 'none' ? `${c.kind} cover` : 'cover';
+    body.push(h('div', { class: 'skipped' }, icon('book'),
+      h('div', {}, h('b', {}, `Book ${what}${c.title ? `: ${c.title}` : ''}`),
+        h('div', { class: 'muted' }, 'Skipped - a cover is not part of the story, so no novel page is written for it.'))));
+  } else if (p.status === 'done' || (p.status === 'failed' && p.text)) {
     body.push(h('div', { class: 'prose' }, paragraphs(p.text).map((t) => h('p', {}, t))));
+  } else if (p.status === 'stopped') {
+    body.push(h('div', { class: 'note' }, icon('alert'), 'The process stopped before this page was written.'));
   } else if (p.status === 'running') {
     body.push(h('div', { class: 'skeleton', 'aria-label': 'Writing...' }, h('i'), h('i'), h('i'), h('i')));
   } else if (p.status === 'failed') {
     body.push(h('div', { class: 'note' }, icon('alert'), p.error || 'This page failed.'));
   }
-  const notes = (p.notes || []).map((n) => h('div', { class: 'note' }, icon('alert'), n));
+  const notes = (p.status === 'skipped' ? [] : (p.notes || [])).map((n) => h('div', { class: 'note' }, icon('alert'), n));
   if (notes.length) body.push(h('div', { class: 'notes' }, notes));
-  if (p.analysis) {
+  if (p.analysis && p.status !== 'skipped') {
     body.push(h('details', { class: 'analysis' }, h('summary', {}, icon('eye'), 'What CTS saw on this page'), h('pre', {}, p.analysis)));
   }
 
   const meta = [];
-  if (p.page_type && p.page_type !== 'story') meta.push(p.page_type);
+  if (p.page_type && p.page_type !== 'story' && p.status !== 'skipped') meta.push(p.page_type);
   if (p.words) meta.push(`${p.words} words`);
   const card = h('article', { class: `page ${p.status}`, id: `p-${vol}-${p.index}` },
     shot,
@@ -327,7 +348,7 @@ function buildCard(vol, p) {
       h('div', { class: 'page-head' },
         h('div', { class: 'page-title' }, `Page ${p.index}`, meta.length ? h('small', {}, meta.join(' - ')) : null,
           p.rating_used ? h('span', { class: `tag ${p.rating_used}` }, p.rating_used) : null),
-        h('div', { class: 'steps' }, STEPS.map((s) => stepChip(s, p)))),
+        h('div', { class: 'steps' }, (p.status === 'skipped' ? [COVER_STEP] : p.steps?.cover ? [COVER_STEP, ...STEPS] : STEPS).map((s) => stepChip(s, p)))),
       body));
   cur.cards.set(p.index, card);
   return card;

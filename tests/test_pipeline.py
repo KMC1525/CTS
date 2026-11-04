@@ -6,13 +6,14 @@ import pytest
 
 from conftest import local_spec
 from cts.pipeline import runner as runner_mod
-from cts.pipeline.runner import Cancelled, FatalError, RunOptions, VolumeRunner
-from mock_llm import ANALYSIS, BIBLE, PROSE
+from cts.pipeline.runner import AgeHalt, Cancelled, FatalError, RunOptions, VolumeRunner
+from mock_llm import ANALYSIS, BIBLE, FRONT_COVER, NOT_COVER, PROSE
 
 
 def make_runner(mock, options=None, cancel=lambda: False, **kw):
     events = []
-    r = VolumeRunner(local_spec(mock), options or RunOptions(words_per_page=120), events.append, cancel,
+    # covers are off by default here: tiny test volumes would otherwise add a cover check to every page
+    r = VolumeRunner(local_spec(mock), options or RunOptions(words_per_page=120, skip_covers=False), events.append, cancel,
                      retry_delays=(0.05, 0.05), **kw)
     return r, events
 
@@ -48,7 +49,7 @@ def test_only_the_analyst_sees_the_image_and_context_flows_forward(mock_llm, pag
     for req in mock.requests:
         role = mock.role_of(req["messages"])
         has_image = any(isinstance(m["content"], list) and any(p.get("type") == "image_url" for p in m["content"]) for m in req["messages"])
-        assert has_image == (role == "analyst")
+        assert has_image == (role in ("analyst", "cover"))
     novelist = [q for q in mock.requests if mock.role_of(q["messages"]) == "novelist"]
     assert "(none - this is the first page)" in user_text(novelist[0]["messages"])
     second = user_text(novelist[1]["messages"])
@@ -63,29 +64,127 @@ def test_braces_and_odd_text_in_model_output_do_not_break_crewai(mock_llm, pages
     assert r.run_volume(0, "V", pages[:1], tmp_path / "w").complete
 
 
-def test_age_guard_forces_sfw_for_a_minor_on_a_sexual_page(mock_llm, pages, tmp_path):
-    flagged = ANALYSIS.replace("sexual_content: none", "sexual_content: explicit").replace("minor_involved: no", "minor_involved: yes")
-    mock = mock_llm(lambda role, msgs: {"analyst": flagged, "keeper": BIBLE}.get(role, PROSE))
-    r, events = make_runner(mock, RunOptions(rating="nsfw", words_per_page=120))
-    result = r.run_volume(0, "V", pages[:1], tmp_path / "w")
-    rec = result.records[0]
-    assert rec["rating_used"] == "sfw" and any("minor" in n for n in rec["notes"])
+def adult_dossier(chars="- Mira: short black hair, red coat; APPARENT AGE: adult; STATED AGE: not stated",
+                  sexual="explicit", minor="no", evidence="none"):
+    return (f"PAGE TYPE: story\nREADING DIRECTION: left-to-right\nSETTING: a bedroom\nCHARACTERS ON PAGE:\n{chars}\n"
+            f"MOOD AND PACING: intimate\nFLAGS:\nsexual_content: {sexual}\nminor_involved: {minor}\n"
+            f"minor_evidence: {evidence}\nviolence: none\n")
+
+
+def run_nsfw(mock_llm, pages, tmp_path, analysis, n=1, writer=None):
+    def handler(role, msgs):
+        if role == "analyst":
+            return analysis if not callable(analysis) else analysis(msgs)
+        if role == "keeper":
+            return BIBLE
+        return writer(msgs) if writer else PROSE
+
+    mock = mock_llm(handler)
+    r, events = make_runner(mock, RunOptions(rating="nsfw", words_per_page=120, skip_covers=False))
+    return mock, r, events, lambda: r.run_volume(0, "Midnight Rooftop", pages[:n], tmp_path / "w")
+
+
+@pytest.mark.parametrize("dossier_kwargs,why", [
+    (dict(minor="yes", evidence="Mira - the caption says she is 15"), "caption says she is 15"),
+    (dict(chars="- Mira: dark hair; APPARENT AGE: adult; STATED AGE: 16"), "stated age under 18"),
+    (dict(sexual="none", minor="yes", evidence="Mira - a young child"), "young child"),  # no sexual content: still stops
+])
+def test_a_character_the_comic_shows_to_be_under_18_stops_the_whole_nsfw_process(mock_llm, pages, tmp_path, dossier_kwargs, why):
+    mock, r, events, go = run_nsfw(mock_llm, pages, tmp_path, adult_dossier(**dossier_kwargs))
+    with pytest.raises(AgeHalt) as halt:
+        go()
+    assert why in str(halt.value) and halt.value.page == 1 and "under 18" in str(halt.value)
+    assert "SFW edition" in str(halt.value)
+    roles = [mock.role_of(q["messages"]) for q in mock.requests]
+    assert "novelist" not in roles and "editor" not in roles  # nothing was written for that page
+    assert [e for e in events if e["type"] == "age_halt"][0]["page"] == 1
+    assert not (tmp_path / "w" / "pages" / "page_0001.json").exists()
+
+
+def test_halting_keeps_the_pages_written_before_it(mock_llm, pages, tmp_path):
+    calls = {"n": 0}
+
+    def analysis(msgs):
+        calls["n"] += 1
+        return adult_dossier(sexual="none") if calls["n"] < 3 else adult_dossier(minor="yes", evidence="Ken - 14 years old")
+
+    mock, r, events, go = run_nsfw(mock_llm, pages, tmp_path, analysis, n=3)
+    with pytest.raises(AgeHalt) as halt:
+        go()
+    assert halt.value.page == 3
+    assert (tmp_path / "w/pages/page_0001.json").exists() and (tmp_path / "w/pages/page_0002.json").exists()
+    assert list((tmp_path / "w/output").glob("*_partial.pdf"))  # the first two pages are exported as a partial novel
+
+
+@pytest.mark.parametrize("chars", [
+    "- Mira: school uniform, small build; APPARENT AGE: teen; STATED AGE: not stated",   # age not mentioned -> adult
+    "- Mira: dark hair; APPARENT AGE: young adult; STATED AGE: 18",                       # 18 is an adult
+    "- Mira: grey suit; APPARENT AGE: adult; STATED AGE: adult\n- Ken: beard; APPARENT AGE: adult; STATED AGE: 41",
+])
+def test_adults_and_unmentioned_ages_continue_in_the_nsfw_edition(mock_llm, pages, tmp_path, chars):
+    mock, r, events, go = run_nsfw(mock_llm, pages, tmp_path, adult_dossier(chars=chars))
+    rec = go().records[0]
+    assert rec["status"] == "done" and rec["rating_used"] == "nsfw" and rec["notes"] == []
     writer_req = next(q for q in mock.requests if mock.role_of(q["messages"]) == "novelist")
-    text = user_text(writer_req["messages"])
-    assert "Rating for this page: SFW" in text and "SAFETY OVERRIDE" in text
+    assert "Rating for this page: NSFW" in user_text(writer_req["messages"])
     system = writer_req["messages"][0]["content"]
-    assert "Rating: SFW" in system and "Rating: NSFW (adults only)" not in system  # the adult policy never reaches the model
+    assert "Age rule" in system and "[[CTS-STOP-MINOR]]" in system and "No age is mentioned -> continue" in system
+
+
+def test_a_minor_established_earlier_stays_a_minor_on_later_pages_and_after_a_resume(mock_llm, pages, tmp_path):
+    state = {"n": 0}
+
+    def analysis(msgs):
+        state["n"] += 1
+        # page 1 is not explicit and states the age on the first line, page 2 shows the same character without it
+        if state["n"] == 1:
+            return adult_dossier(sexual="none", chars="- Mira: red coat; APPARENT AGE: adult; STATED AGE: 15", minor="no")
+        return adult_dossier(sexual="explicit")
+
+    # SFW first: minors are irrelevant there, nothing halts and the pages are saved
+    mock = mock_llm(lambda role, msgs: {"analyst": analysis(msgs), "keeper": BIBLE}.get(role, PROSE))
+    sfw, _ = make_runner(mock, RunOptions(rating="sfw", words_per_page=120, skip_covers=False))
+    assert sfw.run_volume(0, "V", pages[:2], tmp_path / "w").complete
+
+    # now the NSFW edition over the same pages: page 1 already states the age -> halts there
+    state["n"] = 0
+    nsfw, _ = make_runner(mock, RunOptions(rating="nsfw", words_per_page=120, skip_covers=False))
+    with pytest.raises(AgeHalt) as halt:
+        nsfw.run_volume(0, "V", pages[:2], tmp_path / "w2")
+    assert halt.value.page == 1
+
+
+def test_known_minor_is_remembered_across_pages(mock_llm, pages, tmp_path):
+    stated = adult_dossier(sexual="none", chars="- Mira: red coat; APPARENT AGE: adult; STATED AGE: not stated")
+    r_mock = mock_llm(lambda role, msgs: {"analyst": stated, "keeper": BIBLE}.get(role, PROSE))
+    r, _ = make_runner(r_mock, RunOptions(rating="nsfw", words_per_page=120, skip_covers=False))
+    r.known_minors = {"mira"}  # established on an earlier page / volume
+    with pytest.raises(AgeHalt, match="established as under 18"):
+        r.run_volume(0, "V", pages[:1], tmp_path / "w")
+
+
+def test_the_model_can_stop_the_process_itself_with_the_stop_token(mock_llm, pages, tmp_path):
+    mock, r, events, go = run_nsfw(
+        mock_llm, pages, tmp_path, adult_dossier(),
+        writer=lambda msgs: "[[CTS-STOP-MINOR]] Mira is described as a 14-year-old in the caption.")
+    with pytest.raises(AgeHalt, match="14-year-old"):
+        go()
+
+
+def test_the_sfw_edition_never_halts_for_ages(mock_llm, pages, tmp_path):
+    flagged = adult_dossier(minor="yes", evidence="Mira - 15", chars="- Mira: x; APPARENT AGE: teen; STATED AGE: 15")
+    mock = mock_llm(lambda role, msgs: {"analyst": flagged, "keeper": BIBLE}.get(role, PROSE))
+    r, _ = make_runner(mock, RunOptions(rating="sfw", words_per_page=120, skip_covers=False))
+    rec = r.run_volume(0, "V", pages[:1], tmp_path / "w").records[0]
+    assert rec["status"] == "done" and rec["rating_used"] == "sfw"
+    writer_req = next(q for q in mock.requests if mock.role_of(q["messages"]) == "novelist")
+    assert "Age rule" not in writer_req["messages"][0]["content"]  # the adult policy never reaches an SFW run
 
 
 def test_nsfw_edition_for_adult_pages(mock_llm, pages, tmp_path):
-    adult = ANALYSIS.replace("sexual_content: none", "sexual_content: explicit")
-    mock = mock_llm(lambda role, msgs: {"analyst": adult, "keeper": BIBLE}.get(role, PROSE))
-    r, _ = make_runner(mock, RunOptions(rating="nsfw", words_per_page=120))
-    rec = r.run_volume(0, "V", pages[:1], tmp_path / "w").records[0]
+    mock, r, events, go = run_nsfw(mock_llm, pages, tmp_path, adult_dossier())
+    rec = go().records[0]
     assert rec["rating_used"] == "nsfw" and rec["notes"] == []
-    writer_req = next(q for q in mock.requests if mock.role_of(q["messages"]) == "novelist")
-    assert "Rating for this page: NSFW" in user_text(writer_req["messages"])
-    assert "Hard limits" in writer_req["messages"][0]["content"]  # the age rule travels with the adult policy
 
 
 def test_missing_flags_trigger_one_retry_then_fail_safe(mock_llm, pages, tmp_path):
@@ -240,3 +339,177 @@ def test_checkpoint_records_are_valid_json(mock_llm, pages, tmp_path):
     rec = json.loads((tmp_path / "w/pages/page_0001.json").read_text())
     assert rec["index"] == 1 and rec["words"] > 0 and rec["flags"]["minor_involved"] == "no" and rec["bible_after"]
     assert (tmp_path / "w/media/thumb_0001.jpg").exists() and (tmp_path / "w/media/preview_0001.jpg").exists()
+
+
+# ================================================ v0.3: book covers ================================================
+def cover_runner(mock, **opts):
+    options = RunOptions(words_per_page=120, **opts)
+    return make_runner(mock, options)
+
+
+def cover_handler(cover_pages, verdict=FRONT_COVER):
+    """Answers the cover check with a cover verdict for the given 1-based page numbers (found via the task text)."""
+    def handler(role, msgs):
+        if role == "cover":
+            number = int(re.search(r"Is page (\d+) of", user_text(msgs)).group(1))
+            return verdict if number in cover_pages else NOT_COVER
+        return {"analyst": ANALYSIS, "keeper": BIBLE}.get(role, PROSE)
+    return handler
+
+
+@pytest.fixture
+def ten_pages(tmp_path):
+    from PIL import Image
+
+    folder = tmp_path / "ten"
+    folder.mkdir()
+    out = []
+    for i in range(1, 11):
+        p = folder / f"{i:02d}.png"
+        Image.new("RGB", (120, 180), (i * 20, 50, 90)).save(p)
+        out.append(p)
+    return out
+
+
+def test_a_front_cover_is_identified_skipped_and_no_page_is_written_from_it(mock_llm, ten_pages, tmp_path):
+    mock = mock_llm(cover_handler({1}))
+    r, events = cover_runner(mock)
+    result = r.run_volume(0, "Vol 1", ten_pages, tmp_path / "w")
+    first = result.records[0]
+    assert first["status"] == "skipped" and first["skip_reason"] == "cover" and first["text"] == ""
+    assert first["cover"] == {"kind": "front", "title": "Midnight Rooftop", "volume": "1", "confidence": "high"}
+    # the cover was never analysed or written: its page produced exactly one request (the cover check)
+    by_page = {}
+    for q in mock.requests:
+        m = re.search(r"[Pp]age (\d+)", user_text(q["messages"][-1:]))  # the task text of this call
+        if m:
+            by_page.setdefault(int(m.group(1)), []).append(mock.role_of(q["messages"]))
+    assert by_page[1] == ["cover"] and by_page[5] == ["analyst", "novelist", "editor", "keeper"]
+    assert result.complete and [r_["status"] for r_ in result.records].count("skipped") == 1
+    done = [e for e in events if e["type"] == "page_done" and e["page"] == 1][0]
+    assert done["record"]["status"] == "skipped"
+    # a cover adds nothing to the story memory
+    assert [e for e in events if e["type"] == "bible"][0]["text"].startswith("# Story Bible")
+
+
+def test_only_the_first_and_last_two_pages_are_checked(mock_llm, ten_pages, tmp_path):
+    mock = mock_llm(cover_handler(set()))
+    r, _ = cover_runner(mock)
+    r.run_volume(0, "V", ten_pages, tmp_path / "w")
+    checked = sorted(int(re.search(r"Is page (\d+) of", user_text(q["messages"])).group(1))
+                     for q in mock.requests if mock.role_of(q["messages"]) == "cover")
+    assert checked == [1, 2, 9, 10]
+
+
+def test_front_and_back_covers_are_both_skipped_and_the_novel_is_renumbered_with_the_printed_title(mock_llm, ten_pages, tmp_path):
+    import docx
+    from pypdf import PdfReader
+
+    mock = mock_llm(cover_handler({1, 10}))
+    r, _ = cover_runner(mock)
+    result = r.run_volume(0, "vol_one", ten_pages, tmp_path / "w")
+    assert [rec["status"] for rec in result.records].count("skipped") == 2
+    pdf = PdfReader(str(tmp_path / "w" / result.files["pdf"]))
+    assert len(pdf.pages) == 1 + 8  # title page + 8 story pages (not 10)
+    txt = (tmp_path / "w" / result.files["txt"]).read_text(encoding="utf-8")
+    assert txt.startswith("MIDNIGHT ROOFTOP") and txt.count("--- Page ") == 8
+    assert "--- Page 1 ---" in txt and "--- Page 8 ---" in txt and "--- Page 9 ---" not in txt  # numbered 1..n
+    assert "Midnight Rooftop" in docx.Document(str(tmp_path / "w" / result.files["docx"])).paragraphs[5].text
+
+
+def test_a_low_confidence_guess_is_not_treated_as_a_cover(mock_llm, ten_pages, tmp_path):
+    guess = FRONT_COVER.replace("CONFIDENCE: high", "CONFIDENCE: low")
+    mock = mock_llm(cover_handler({1}, verdict=guess))
+    r, _ = cover_runner(mock)
+    rec = r.run_volume(0, "V", ten_pages[:3], tmp_path / "w").records[0]
+    assert rec["status"] == "done" and rec["text"] == PROSE  # conservative: a real story page is never dropped
+
+
+def test_skip_covers_off_means_no_check_and_every_page_is_written(mock_llm, ten_pages, tmp_path):
+    mock = mock_llm(cover_handler({1}))
+    r, _ = cover_runner(mock, skip_covers=False)
+    result = r.run_volume(0, "V", ten_pages[:3], tmp_path / "w")
+    assert all(rec["status"] == "done" for rec in result.records)
+    assert not any(mock.role_of(q["messages"]) == "cover" for q in mock.requests)
+
+
+def test_the_analyst_can_also_recognise_a_cover_near_the_edges_but_not_in_the_middle(mock_llm, ten_pages, tmp_path):
+    cover_dossier = ANALYSIS.replace("PAGE TYPE: story", "PAGE TYPE: cover")
+    state = {"page": 0}
+
+    def handler(role, msgs):
+        if role == "cover":
+            return NOT_COVER
+        if role == "analyst":
+            state["page"] = int(re.search(r"Analyse page (\d+) of", user_text(msgs)).group(1))
+            return cover_dossier if state["page"] in (3, 6) else ANALYSIS  # page 3 is at the edge, page 6 in the middle
+        return {"keeper": BIBLE}.get(role, PROSE)
+
+    r, _ = cover_runner(mock_llm(handler))
+    recs = r.run_volume(0, "V", ten_pages, tmp_path / "w").records
+    assert recs[2]["status"] == "skipped"  # page 3: within the first three pages
+    assert recs[5]["status"] == "done"  # page 6: a chapter-title-style "cover" in the middle stays in the novel
+
+
+def test_a_failing_cover_check_does_not_fail_the_page(mock_llm, ten_pages, tmp_path):
+    def handler(role, msgs):
+        if role == "cover":
+            raise RuntimeError("provider hiccup")
+        return {"analyst": ANALYSIS, "keeper": BIBLE}.get(role, PROSE)
+
+    r, _ = cover_runner(mock_llm(handler))
+    r.retry_delays = (0.01,)
+    rec = r.run_volume(0, "V", ten_pages[:2], tmp_path / "w").records[0]
+    assert rec["status"] == "done" and any("cover" in n for n in rec["notes"])
+
+
+def test_skipped_covers_are_checkpointed_and_replayed_on_resume(mock_llm, ten_pages, tmp_path):
+    mock = mock_llm(cover_handler({1}))
+    r, _ = cover_runner(mock)
+    work = tmp_path / "w"
+    r.run_volume(0, "V", ten_pages[:3], work)
+    assert json.loads((work / "pages/page_0001.json").read_text())["status"] == "skipped"
+    before = len(mock.requests)
+    r2, events2 = cover_runner(mock)
+    result = r2.run_volume(0, "V", ten_pages[:3], work)
+    assert len(mock.requests) == before and result.complete
+    assert [e["record"]["status"] for e in events2 if e["type"] == "page_done" and e.get("replayed")][0] == "skipped"
+
+
+# ============================== v0.3: the local server dies in the middle of a job ==============================
+def test_a_dead_local_server_is_restarted_and_the_page_continues(mock_llm, pages, tmp_path):
+    restarts = []
+    steps = FlakySteps(1, ConnectionError("Connection error."))
+
+    def recover(exc):
+        restarts.append(type(exc).__name__)
+        return True
+
+    r, events = make_runner(mock_llm(), steps=steps, recover=recover)
+    assert r.run_volume(0, "V", pages[:1], tmp_path / "w").complete
+    assert restarts == ["ConnectionError"] and any("started again" in e.get("message", "") for e in events)
+
+
+def test_when_the_server_cannot_be_restarted_the_job_fails_with_the_reason(mock_llm, pages, tmp_path):
+    def recover(exc):
+        raise RuntimeError("out of memory")
+
+    r, _ = make_runner(mock_llm(), steps=FlakySteps(5, ConnectionError("Connection error.")), recover=recover)
+    with pytest.raises(FatalError, match="could not be restarted: out of memory"):
+        r.run_volume(0, "V", pages[:1], tmp_path / "w")
+
+
+def test_pressing_stop_while_a_call_fails_does_not_restart_the_server(mock_llm, pages, tmp_path):
+    stopped = {"flag": False}
+    calls = []
+
+    class StopSteps(FlakySteps):
+        def analyze(self, ctx, token, reminder=""):
+            stopped["flag"] = True  # the user pressed Stop; the engine is being killed, so this call fails
+            raise ConnectionError("Connection error.")
+
+    r, _ = make_runner(mock_llm(), steps=StopSteps(0, None), recover=lambda e: calls.append(e) or True,
+                       cancel=lambda: stopped["flag"])
+    with pytest.raises(Cancelled):
+        r.run_volume(0, "V", pages[:1], tmp_path / "w")
+    assert calls == []

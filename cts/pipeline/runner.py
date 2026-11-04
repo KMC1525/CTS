@@ -14,7 +14,8 @@ from ..ingest import encode_for_model, make_preview, make_thumbnail
 from . import budget
 from .crew import PageContext, Steps
 from .text import (
-    Flags, clean_document, decide_rating, looks_like_refusal, parse_flags, word_count,
+    CoverInfo, clean_document, decide_rating, looks_like_refusal, minor_evidence, parse_cover, parse_flags, stop_requested,
+    word_count,
 )
 
 Emit = Callable[[dict[str, Any]], None]
@@ -32,12 +33,24 @@ class StepFailed(Exception):
     """A step kept failing after retries; the page is marked failed, the volume goes on."""
 
 
+class AgeHalt(Exception):
+    """The NSFW edition met a character the comic clearly shows to be under 18: the whole process stops."""
+
+    def __init__(self, volume_name: str, page: int, evidence: str):
+        self.volume_name, self.page, self.evidence = volume_name, page, evidence
+        super().__init__(
+            f"NSFW edition stopped on page {page} of \"{volume_name}\": the comic makes it clear that a "
+            f"character is under 18 ({evidence}). Nothing was written for that page. "
+            "Generate the SFW edition of this comic instead."
+        )
+
 @dataclass
 class RunOptions:
     rating: str = "sfw"
     words_per_page: int = 300
     language: str = "auto"
     carry_bible: bool = True
+    skip_covers: bool = True
 
     def normalised(self) -> "RunOptions":
         return RunOptions(
@@ -45,6 +58,7 @@ class RunOptions:
             words_per_page=max(80, min(1200, int(self.words_per_page or 300))),
             language=(self.language or "auto").strip() or "auto",
             carry_bible=bool(self.carry_bible),
+            skip_covers=bool(self.skip_covers),
         )
 
 
@@ -103,6 +117,7 @@ class VolumeRunner:
         should_cancel: Callable[[], bool],
         steps: Steps | None = None,
         retry_delays: tuple[float, ...] = (4.0, 12.0),
+        recover: Callable[[BaseException], bool] | None = None,
     ):
         self.spec = spec
         self.options = options.normalised()
@@ -110,7 +125,10 @@ class VolumeRunner:
         self.should_cancel = should_cancel
         self.steps = steps or Steps(spec)
         self.retry_delays = retry_delays
+        # Called after a failed step; a local model whose server died is restarted there (True = restarted).
+        self.recover = recover
         self.tokens = 0
+        self.known_minors: set[str] = set()  # characters the comic established as under 18 (NSFW edition)
 
     # ------------------------------------------------------------------ helpers
     def _check(self) -> None:
@@ -135,15 +153,44 @@ class VolumeRunner:
             except Cancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - provider SDKs raise many types
+                self._check()  # Stop pressed while the call was failing/aborted: do not retry or restart anything
                 message, fatal = llm_mod.describe_error(exc)
                 if fatal:
                     raise FatalError(message) from exc
+                if self.recover is not None:
+                    try:
+                        if self.recover(exc):
+                            self._log("warn", "The local model had stopped, so it was started again.")
+                    except Cancelled:
+                        raise
+                    except Exception as restart_error:  # noqa: BLE001
+                        raise FatalError(f"The local model stopped and could not be restarted: {restart_error}") from exc
                 if attempt == attempts - 1:
                     raise StepFailed(f"{what}: {message}") from exc
                 delay = self.retry_delays[attempt]
                 self._log("warn", f"{what} failed ({message}). Retrying in {delay:g}s...")
                 self._sleep(delay)
         raise StepFailed(what)  # pragma: no cover
+
+    # ------------------------------------------------------------------- covers
+    @staticmethod
+    def _cover_candidate(index: int, total: int, wide: bool = False) -> bool:
+        """Covers sit at the very start/end of a volume: first and last two pages (three when ``wide``)."""
+        edge = 3 if wide else 2
+        return index <= edge or index > total - edge
+
+    def _skipped_record(self, index: int, bible: str, cover: Any, raw: str, started: float) -> dict[str, Any]:
+        label = cover.kind if cover.kind != "none" else "cover"
+        what = f"{label} cover" if not label.endswith("cover") else label
+        title = f": {cover.title}" if cover.title else ""
+        self._log("info", f"Page {index} is a book {what}{title} - skipped, no novel page is written for it.")
+        return {
+            "index": index, "status": "skipped", "skip_reason": "cover", "page_type": "cover", "rating_used": "",
+            "text": "", "analysis": raw, "words": 0, "flags": {}, "seconds": round(time.monotonic() - started, 1),
+            "notes": [f"Book {what}{title} - not turned into a novel page."],
+            "cover": {"kind": cover.kind, "title": cover.title, "volume": cover.volume, "confidence": cover.confidence},
+            "bible_after": bible,
+        }
 
     # ------------------------------------------------------------------- one page
     def process_page(self, vol: int, name: str, path: Path, index: int, total: int,
@@ -160,11 +207,25 @@ class VolumeRunner:
         def step(which: str, status: str) -> None:
             self.emit({"type": "step", "volume": vol, "page": index, "step": which, "status": status})
 
-        # 1 - read the page ---------------------------------------------------
-        step("analyze", "running")
         image, mime = encode_for_model(path, self.spec.max_image_side)
         token = llm_mod.register_image(image, mime)
         try:
+            # 0 - is it a book cover? (first/last pages only; covers are skipped, never written) ----------
+            if self.options.skip_covers and self._cover_candidate(index, total):
+                step("cover", "running")
+                try:
+                    verdict = self._retry(lambda: self.steps.identify_cover(ctx, token), "Checking for a cover")
+                    self.tokens += verdict.tokens
+                    cover = parse_cover(verdict.text)
+                    if cover.is_cover:
+                        step("cover", "done")
+                        return self._skipped_record(index, bible, cover, verdict.text, started)
+                except StepFailed as exc:  # the check is optional: carry on and treat the page as a story page
+                    notes.append(f"Could not check whether this page is a cover ({exc}).")
+                step("cover", "done")
+
+            # 1 - read the page ---------------------------------------------------
+            step("analyze", "running")
             analysis = self._retry(lambda: self.steps.analyze(ctx, token), "Reading the page")
             self.tokens += analysis.tokens
             flags = parse_flags(analysis.text)
@@ -186,7 +247,18 @@ class VolumeRunner:
             raise FatalError("The model returned no description of the page. Is it a vision-capable model?")
         step("analyze", "done")
 
-        # 2 - safety / rating gate (plain code) -------------------------------
+        # A page the analyst calls a cover, near the start/end of the volume, is a cover too.
+        if self.options.skip_covers and flags.page_type == "cover" and self._cover_candidate(index, total, wide=True):
+            return self._skipped_record(index, bible, CoverInfo(is_cover=True, kind="front", confidence="medium"),
+                                        analysis.text, started)
+
+        # 2 - age rule + rating gate (plain code) -----------------------------------
+        if self.options.rating == "nsfw":
+            evidence = minor_evidence(flags, self.known_minors)
+            self.known_minors |= {n.strip().lower() for n in flags.minor_names}
+            if evidence:
+                self.emit({"type": "age_halt", "volume": vol, "page": index, "evidence": evidence})
+                raise AgeHalt(name, index, evidence)
         rating_used, safety_note = decide_rating(self.options.rating, flags)
         if safety_note:
             notes.append(safety_note)
@@ -208,6 +280,10 @@ class VolumeRunner:
             )
             self.tokens += draft.tokens
             step("polish", "done")
+            if stop_requested(draft.text) or stop_requested(final.text):  # the NSFW prompt told the model to stop
+                evidence = (final.text or draft.text).replace("[[CTS-STOP-MINOR]]", "").strip()[:240]
+                self.emit({"type": "age_halt", "volume": vol, "page": index, "evidence": evidence})
+                raise AgeHalt(name, index, evidence or "the model reported a character under 18")
             text = final.text or draft.text
             refused = (not text.strip()) or looks_like_refusal(draft.text) or looks_like_refusal(text)
             return text, refused
@@ -276,18 +352,24 @@ class VolumeRunner:
         history: list[str] = list(prior_pages or [])
         failures_in_a_row = 0
         cancelled = False
+        halt: AgeHalt | None = None
+        if not self.options.carry_bible:
+            self.known_minors = set()  # unrelated volumes may reuse names
         self.emit({"type": "volume_start", "volume": vol, "name": name, "total": total})
 
         try:
             for index, path in enumerate(page_paths, start=1):
                 self._check()
                 record = load_record(work, index)
-                if record and record.get("status") == "done":
+                if record and record.get("status") in ("done", "skipped"):
                     self.emit({"type": "page_done", "volume": vol, "page": index, "replayed": True,
                                "record": _public_record(record)})
                     result.records.append(record)
                     result.bible = record.get("bible_after") or result.bible
-                    history.append(record["text"])
+                    if record["status"] == "done":
+                        history.append(record["text"])
+                        if self.options.rating == "nsfw":  # remember who the comic established as a minor
+                            self.known_minors |= {n.strip().lower() for n in parse_flags(record.get("analysis", "")).minor_names}
                     continue
 
                 save_media(work, index, path)
@@ -307,36 +389,48 @@ class VolumeRunner:
                 save_record(work, record)
                 result.records.append(record)
                 result.bible = record["bible_after"]
-                history.append(record["text"])
+                if record["status"] != "skipped":
+                    history.append(record["text"])
                 self.emit({"type": "page_done", "volume": vol, "page": index, "record": _public_record(record),
                            "tokens": self.tokens})
-                self.emit({"type": "bible", "volume": vol, "text": result.bible})
+                if record["status"] != "skipped":
+                    self.emit({"type": "bible", "volume": vol, "text": result.bible})
         except Cancelled:
             cancelled = True
+        except AgeHalt as stop:
+            halt = stop
         finally:
             result.tokens = self.tokens
-            done_pages = [r for r in result.records]
-            if done_pages:
-                result.files = export_volume(work, name, done_pages, self.options, partial=len(done_pages) < total)
-                self.emit({"type": "volume_files", "volume": vol, "files": result.files,
-                           "partial": len(done_pages) < total})
+            if any(r.get("status") != "skipped" for r in result.records):
+                partial = len(result.records) < total
+                result.files = export_volume(work, name, result.records, self.options, partial=partial)
+                self.emit({"type": "volume_files", "volume": vol, "files": result.files, "partial": partial})
+        if halt is not None:
+            raise halt
         if cancelled:
             raise Cancelled()
-        result.complete = len(result.records) == total and all(r.get("status") == "done" for r in result.records)
+        result.complete = len(result.records) == total and all(r.get("status") in ("done", "skipped") for r in result.records)
         return result
 
 
 def _public_record(record: dict[str, Any]) -> dict[str, Any]:
     return {k: record.get(k) for k in
-            ("index", "status", "page_type", "rating_used", "text", "analysis", "notes", "words", "seconds")}
+            ("index", "status", "page_type", "rating_used", "text", "analysis", "notes", "words", "seconds",
+             "skip_reason", "cover")}
 
 
 def export_volume(work: Path, name: str, records: list[dict[str, Any]], options: RunOptions,
                   partial: bool = False) -> dict[str, str]:
-    title = name + (" (partial)" if partial else "")
+    """Write TXT/DOCX/PDF. Skipped pages (covers) are left out and the novel pages are numbered 1..n."""
+    ordered = sorted(records, key=lambda r: r["index"])
+    story = [r for r in ordered if r.get("status") != "skipped"]
+    covers = [r.get("cover") or {} for r in ordered if r.get("status") == "skipped"]
+    printed = next((c["title"] for c in covers if c.get("title") and c.get("kind") in ("front", "wrap-around")), "") \
+        or next((c["title"] for c in covers if c.get("title")), "")
+    base = printed or name
     novel = Novel(
-        title=title,
-        pages=[NovelPage(r["index"], r["text"], r.get("page_type", "story")) for r in sorted(records, key=lambda r: r["index"])],
+        title=base + (" (partial)" if partial else ""),
+        pages=[NovelPage(n, r["text"], r.get("page_type", "story")) for n, r in enumerate(story, start=1)],
         language=options.language,
         rating=options.rating,
     )

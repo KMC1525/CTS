@@ -15,8 +15,8 @@ Point of view, tense, register and style decisions already made (one or two line
 ## Language
 The language the novel is written in.
 ## Characters
-- Name (aliases): role, appearance (hair, eyes, build, outfit, marks), age bracket,
-  personality in a phrase, relationships, speech habits.
+- Name (aliases): role, **age as the comic states it** (a number, `adult`, `minor`, or `not stated`),
+  appearance (hair, eyes, build, outfit, marks), personality in a phrase, relationships, speech habits.
 ## Places and objects
 - Name: what it is and what it looks like.
 ## Story so far
@@ -29,7 +29,8 @@ Invented words, titles, organisations, powers - with the exact spelling used.
 
 ## Rules
 
-- Only record facts established by the pages. Never speculate.
+- Only record facts established by the pages. Never speculate. Record an age only when the comic gives
+  it; otherwise write `not stated` - never estimate it from the drawing.
 - When a character is introduced under a visual label, give them a stable name as soon as
   the comic names them, and keep the label as an alias.
 - Merge, shorten and drop trivia so the whole bible stays under the word limit you are

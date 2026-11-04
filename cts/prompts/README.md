@@ -5,10 +5,11 @@ run time, so you can tune the quality of your novels without touching any Python
 
 | File | Agent | What it controls |
 | --- | --- | --- |
-| `comic_analyst.md` | Comic Page Analyst (vision) | How a comic page is read: panel order, dialogue transcription, characters, mood, safety flags |
+| `cover-identify.md` | Cover Identifier (vision) | Decides whether a page is a book cover (front, back, spine, jacket); covers are skipped and never become novel pages |
+| `comic_analyst.md` | Comic Page Analyst (vision) | How a comic page is read: panel order, dialogue transcription, characters, stated ages, mood, safety flags |
 | `novelist.md` | Novelist | The prose craft: voice, fidelity to the page, pacing, dialogue, continuity |
 | `rating_sfw.md` | Novelist (SFW mode) | Content limits for the all-audiences version |
-| `rating_nsfw.md` | Novelist (NSFW mode) | Content rules for the adults-only version (includes the non-negotiable age guard) |
+| `rating_nsfw.md` | Novelist (NSFW mode) | Content rules for the adults-only version, including the age rule: a clearly under-18 character halts the process; stated adults, or no age mentioned, continue |
 | `editor.md` | Editor | The polish pass: fidelity check, style, length budget |
 | `story_keeper.md` | Story Keeper | The running "story bible" that keeps names, looks and plot consistent |
 
