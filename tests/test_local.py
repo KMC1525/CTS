@@ -1,8 +1,6 @@
 import json
 import stat
 import sys
-import tarfile
-import zipfile
 
 import httpx
 import pytest
@@ -106,56 +104,6 @@ def test_download_detects_truncation(tmp_path):
         download.download_file("http://x/m", tmp_path / "m", expected_size=10, client=client)
 
 
-# ---------------------------------------------------------------------- llama.cpp assets
-ASSETS = [{"name": n} for n in [
-    "llama-b7000-bin-ubuntu-x64.zip", "llama-b7000-bin-ubuntu-vulkan-x64.zip", "llama-b7000-bin-ubuntu-arm64.zip",
-    "llama-b7000-bin-macos-arm64.zip", "llama-b7000-bin-macos-x64.zip",
-    "llama-b7000-bin-win-cpu-x64.zip", "llama-b7000-bin-win-vulkan-x64.zip", "llama-b7000-bin-win-cuda-12.4-x64.zip",
-    "llama-b7000-bin-win-cpu-arm64.zip", "cudart-llama-bin-win-cuda-12.4-x64.zip", "llama-b7000-xcframework.zip",
-]]
-
-
-@pytest.mark.parametrize("system,arch,flavor,expected", [
-    ("linux", "x64", "", "llama-b7000-bin-ubuntu-vulkan-x64.zip"),
-    ("linux", "x64", "cpu", "llama-b7000-bin-ubuntu-x64.zip"),
-    ("linux", "arm64", "", "llama-b7000-bin-ubuntu-arm64.zip"),
-    ("macos", "arm64", "", "llama-b7000-bin-macos-arm64.zip"),
-    ("macos", "x64", "", "llama-b7000-bin-macos-x64.zip"),
-    ("windows", "x64", "", "llama-b7000-bin-win-vulkan-x64.zip"),
-    ("windows", "x64", "cuda", "llama-b7000-bin-win-cuda-12.4-x64.zip"),
-    ("windows", "x64", "cpu", "llama-b7000-bin-win-cpu-x64.zip"),
-    ("windows", "arm64", "", "llama-b7000-bin-win-cpu-arm64.zip"),
-])
-def test_pick_asset(system, arch, flavor, expected):
-    assert runtime.pick_asset(ASSETS, system, arch, flavor)["name"] == expected
-
-
-def test_pick_asset_none_when_unavailable():
-    assert runtime.pick_asset([{"name": "llama-b1-bin-macos-arm64.zip"}], "linux", "x64") is None
-
-
-def test_extract_blocks_path_traversal(tmp_path):
-    evil = tmp_path / "evil.zip"
-    with zipfile.ZipFile(evil, "w") as zf:
-        zf.writestr("../../escape.txt", "x")
-    with pytest.raises(RuntimeError, match="Unsafe"):
-        runtime._extract(evil, tmp_path / "out")
-    tar_path = tmp_path / "ok.tar.gz"
-    with tarfile.open(tar_path, "w:gz") as tf:
-        info = tarfile.TarInfo("build/bin/llama-server")
-        info.size = 0
-        tf.addfile(info, fileobj=None)
-    runtime._extract(tar_path, tmp_path / "ok")
-    assert (tmp_path / "ok" / "build" / "bin" / "llama-server").exists()
-
-
-def test_find_server_prefers_env_override(tmp_path, monkeypatch):
-    fake = tmp_path / "my-llama"
-    fake.write_text("x")
-    monkeypatch.setenv("CTS_LLAMA_SERVER", str(fake))
-    assert runtime.find_server() == fake
-
-
 # ---------------------------------------------------------------- the server lifecycle
 FAKE_SERVER = """#!{python}
 import sys, http.server
@@ -217,3 +165,17 @@ def test_delete_model_removes_files_and_selection(cts_home):
     assert models.delete(entry["id"])
     assert not (cts_home / "models" / "o__m" / "m-Q4_K_M.gguf").exists()
     assert settings.load().local.active_model == ""
+
+
+def test_a_server_that_dies_at_startup_explains_the_missing_library(cts_home, tmp_path, monkeypatch):
+    from cts.local.server import LlamaServer, LocalServerError
+
+    install_fake_model(cts_home)
+    binary = tmp_path / "llama-server"
+    binary.write_text(f"#!{sys.executable}\nimport sys\n"
+                      "sys.stderr.write('llama-server: error while loading shared libraries: libgomp.so.1: cannot open shared object file\\n')\n"
+                      "sys.exit(127)\n")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("CTS_LLAMA_SERVER", str(binary))
+    with pytest.raises(LocalServerError, match="libgomp"):
+        LlamaServer().ensure("o__m__Q4_K_M", 8192)

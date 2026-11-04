@@ -2,7 +2,7 @@
 
 import os as _os
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # CTS is a local, private tool: keep CrewAI from phoning home or opening trace prompts.
 for _key, _value in {

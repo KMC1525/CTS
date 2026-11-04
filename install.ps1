@@ -3,8 +3,11 @@
 #   irm https://raw.githubusercontent.com/KMC1525/CTS/main/install.ps1 | iex
 #
 # What it does: installs `uv` (a tiny Python manager) if needed, creates a private Python 3.12
-# environment, installs CTS and every library it needs, downloads the llama.cpp engine for local
-# models, and adds CTS to the Start Menu.
+# environment, installs CTS and every library it needs, installs (or updates) the llama.cpp engine
+# for local models plus the Visual C++ runtime it needs, checks that everything works (`cts doctor`),
+# and adds CTS to the Start Menu.
+#
+# Running it again UPDATES everything: CTS itself, all Python libraries and llama.cpp.
 #
 # Options when running the file:  .\install.ps1 -NoRuntime -NoDesktop -Dev -Uninstall -Purge
 # Environment: CTS_REF (branch/tag, default main)  CTS_INSTALL_HOME (default %LOCALAPPDATA%\Programs\CTS)
@@ -29,6 +32,7 @@ function Install-CTS {
     $InstallHome = if ($env:CTS_INSTALL_HOME) { $env:CTS_INSTALL_HOME } else { Join-Path $env:LOCALAPPDATA 'Programs\CTS' }
     $Venv = Join-Path $InstallHome 'venv'
     $BinDir = Join-Path $InstallHome 'bin'
+    $runtimeFailed = $false
     $VenvPython = Join-Path $Venv 'Scripts\python.exe'
     $CtsExe = Join-Path $Venv 'Scripts\cts.exe'
     $CtsGui = Join-Path $Venv 'Scripts\cts-gui.exe'
@@ -88,6 +92,12 @@ function Install-CTS {
     $hasUv = [bool](Get-Command uv -ErrorAction SilentlyContinue)
 
     New-Item -ItemType Directory -Force -Path $InstallHome, $BinDir -ErrorAction Stop | Out-Null
+    if (Test-Path $CtsExe) {
+        # a running CTS keeps cts.exe locked, which would make the update fail halfway
+        Say 'Updating an existing installation'
+        try { & $CtsExe stop | Out-Null } catch { }
+        Start-Sleep -Seconds 1
+    }
     $PipArgs = @($Src)
     if ($Dev -and (Test-Path $Src -PathType Container)) { $PipArgs = @('-e', $Src) }
 
@@ -95,7 +105,9 @@ function Install-CTS {
         Say "Creating a private Python $PyVersion environment"
         Run-Native { uv venv --python $PyVersion --allow-existing $Venv } 'uv could not create the Python environment.'
         Say 'Installing CTS and its libraries (CrewAI, FastAPI, Pillow...). This can take a few minutes.'
-        Run-Native { uv pip install --python $VenvPython --upgrade @PipArgs } 'Installing the Python packages failed.'
+        # --reinstall-package/--refresh-package: always take the new CTS code even if the version string is
+        # unchanged and a download is cached; --upgrade brings every dependency to its newest allowed release.
+        Run-Native { uv pip install --python $VenvPython --upgrade --reinstall-package comic-to-story --refresh-package comic-to-story @PipArgs } 'Installing the Python packages failed.'
     } else {
         Warn 'uv is unavailable - falling back to your system Python.'
         $py = $null
@@ -111,6 +123,7 @@ function Install-CTS {
         $pyArgs = @(Tail $py) + @('-m', 'venv', $Venv)
         Run-Native { & $py[0] @pyArgs } 'Could not create the virtual environment.'
         Run-Native { & $VenvPython -m pip install --upgrade pip } 'Could not upgrade pip.'
+        Run-Native { & $VenvPython -m pip install --force-reinstall --no-deps @PipArgs } 'Installing CTS failed.'
         Run-Native { & $VenvPython -m pip install --upgrade @PipArgs } 'Installing the Python packages failed.'
     }
 
@@ -124,9 +137,9 @@ function Install-CTS {
 
     # -------------------------------------------------------- llama.cpp (local AI)
     if (-not $NoRuntime) {
-        Say 'Installing the llama.cpp engine (runs local GGUF models)'
-        & $CtsExe setup-runtime
-        if ($LASTEXITCODE -ne 0) { Warn 'Skipped. You can install it later from Settings > Local models.' }
+        Say 'Installing / updating the llama.cpp engine (runs local GGUF models)'
+        & $CtsExe setup-runtime --update
+        if ($LASTEXITCODE -ne 0) { $runtimeFailed = $true; Warn 'Skipped. Retry with: cts setup-runtime --repair  (or from Settings > Local models).' }
     }
 
     # --------------------------------------------------------------- Start Menu
@@ -136,6 +149,12 @@ function Install-CTS {
         & $CtsExe install-desktop --exec $exec
         if ($LASTEXITCODE -ne 0) { Warn 'Could not create the Start Menu shortcut.' }
     }
+
+    Say 'Checking that every library works'
+    # llama.cpp was just attempted above - do not try (and report) it a second time
+    $doctorArgs = @('--fix'); if ($NoRuntime -or $runtimeFailed) { $doctorArgs += '--no-runtime' }
+    & $CtsExe doctor @doctorArgs
+    if ($LASTEXITCODE -ne 0) { Warn 'Some checks failed - see above. You can re-run: cts doctor --fix' }
 
     Say 'CTS is installed.'
     Write-Host 'Open it from the Start Menu (search for CTS), or open a new terminal and run:  cts'

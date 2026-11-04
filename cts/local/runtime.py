@@ -1,11 +1,33 @@
-"""Finds or installs ``llama-server`` (llama.cpp), the engine that runs local GGUF models."""
+"""Finds, installs, verifies and updates ``llama-server`` (llama.cpp), the engine for local GGUF models.
+
+Release asset names follow llama.cpp's own release workflow (checked against its ``release.yml``):
+
+* macOS   ``llama-<tag>-bin-macos-{arm64,x64}.tar.gz``             (Metal is built in)
+* Linux   ``llama-<tag>-bin-ubuntu-{x64,arm64}.tar.gz``, ``...ubuntu-vulkan-{x64,arm64}.tar.gz``,
+          ``...ubuntu-cuda-<ver>-x64.tar.gz`` + ``cudart-llama-<tag>-bin-ubuntu-cuda-<ver>-x64.tar.gz``
+* Windows ``llama-<tag>-bin-win-{cpu,vulkan}-{x64,arm64}.zip``, ``...win-cuda-<ver>-x64.zip``
+          + ``cudart-llama-bin-win-cuda-<ver>-x64.zip`` (note: no tag in the cudart name)
+
+What this module guarantees (v0.2):
+
+* the downloaded binary is **run** (``--version``) before it is accepted;
+* missing system libraries / the VC++ runtime are installed when possible (see ``deps``);
+* if the preferred GPU build will not start, the plain CPU build is tried automatically;
+* installs are atomic (temp folder, then rename) and never leave a half-extracted engine behind;
+* ``update=True`` moves a CTS-managed engine to the newest release;
+* if the GitHub API is rate-limited or blocked, the release tag is read from the website redirect
+  and the asset names are derived from the naming scheme above.
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import platform
+import re
 import shutil
 import stat
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -14,20 +36,27 @@ from typing import Any, Callable
 import httpx
 
 from ..paths import runtime_dir
-from .download import download_file
+from . import deps
+from .download import DownloadCancelled, download_file
 
-RELEASES_URL = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+GITHUB = "https://github.com/ggml-org/llama.cpp"
+RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+RELEASES_LATEST = f"{GITHUB}/releases/latest"
 EXE = "llama-server.exe" if os.name == "nt" else "llama-server"
-_FLAVORS = ("cuda", "vulkan", "hip", "rocm", "sycl", "opencl", "kleidiai", "musa", "openvino", "adreno", "cann", "aclnn")
+_FLAVORS = ("cuda", "vulkan", "hip", "rocm", "sycl", "opencl", "kleidiai", "musa", "openvino", "adreno", "cann",
+            "aclnn", "snapdragon", "zdnn")
 _ARCHIVE_SUFFIXES = (".zip", ".tar.gz", ".tgz")
 
 MANUAL_HELP = (
-    "Install llama.cpp yourself and CTS will find it: macOS `brew install llama.cpp`, "
+    "You can install llama.cpp yourself and CTS will find it: macOS `brew install llama.cpp`, "
     "Windows `winget install llama.cpp`, Linux see github.com/ggml-org/llama.cpp "
     "(or set CTS_LLAMA_SERVER to the llama-server binary)."
 )
 
+Progress = Callable[[str, int, int], None]
 
+
+# ---------------------------------------------------------------------------- locating
 def system_arch() -> tuple[str, str]:
     system = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}.get(platform.system(), platform.system().lower())
     machine = platform.machine().lower()
@@ -35,116 +64,383 @@ def system_arch() -> tuple[str, str]:
     return system, arch
 
 
+def _state_file() -> Path:
+    return runtime_dir() / "current.json"
+
+
+def managed_info() -> dict[str, Any] | None:
+    """The CTS-managed engine recorded by the last successful install, if it is still on disk."""
+    try:
+        info = json.loads(_state_file().read_text(encoding="utf-8"))
+        if Path(info["path"]).is_file():
+            return info
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+def tag_number(tag: str) -> int:
+    match = re.search(r"(\d+)", tag or "")
+    return int(match.group(1)) if match else 0
+
+
+def _inside_runtime(path: Path) -> bool:
+    try:
+        return runtime_dir().resolve() in path.resolve().parents
+    except OSError:
+        return False
+
+
 def find_server() -> Path | None:
-    """Locate llama-server: env override, CTS runtime folder, then PATH."""
+    """Locate llama-server: CTS_LLAMA_SERVER, the CTS-managed engine, PATH, then legacy installs."""
     override = os.environ.get("CTS_LLAMA_SERVER")
     if override and Path(override).is_file():
         return Path(override)
-    for candidate in sorted(runtime_dir().rglob(EXE)):
-        if candidate.is_file():
-            return candidate
+    info = managed_info()
+    if info:
+        return Path(info["path"])
     found = shutil.which("llama-server")
-    return Path(found) if found else None
+    if found:
+        return Path(found)
+    # engines installed by CTS 0.1 (no state file): newest folder first
+    for candidate in sorted(runtime_dir().rglob(EXE), reverse=True):
+        if candidate.is_file() and candidate.parent.parent.name != "downloads" and ".tmp" not in str(candidate):
+            return candidate
+    return None
 
 
-def pick_asset(assets: list[dict[str, Any]], system: str, arch: str, flavor: str = "") -> dict[str, Any] | None:
-    """Choose the right prebuilt llama.cpp archive for this machine.
+def runtime_info() -> dict[str, Any]:
+    """Describe the engine in use (cheap: does not run it)."""
+    path = find_server()
+    if path is None:
+        return {"installed": False, "path": "", "origin": "", "tag": "", "flavor": ""}
+    info = managed_info()
+    if os.environ.get("CTS_LLAMA_SERVER") and Path(os.environ["CTS_LLAMA_SERVER"]) == path:
+        return {"installed": True, "path": str(path), "origin": "env", "tag": "", "flavor": ""}
+    if info and Path(info["path"]) == path:
+        return {"installed": True, "path": str(path), "origin": "cts", "tag": info.get("tag", ""),
+                "flavor": info.get("flavor", "")}
+    if _inside_runtime(path):  # installed by CTS 0.1, before the state file existed
+        return {"installed": True, "path": str(path), "origin": "cts", "tag": "", "flavor": ""}
+    return {"installed": True, "path": str(path), "origin": "system", "tag": "", "flavor": ""}
 
-    Windows/Linux x64 prefer the Vulkan build (any GPU vendor, works without CUDA) and fall
-    back to CPU; macOS builds already include Metal. Set CTS_LLAMA_FLAVOR (cpu, vulkan,
-    cuda...) to force a flavor.
+
+def runtime_env(binary: Path | str) -> dict[str, str]:
+    """Environment that lets the binary find the shared libraries shipped next to it."""
+    env = dict(os.environ)
+    folder = str(Path(binary).parent)
+    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        env[var] = folder + os.pathsep + env.get(var, "")
+    if os.name == "nt":
+        env["PATH"] = folder + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def verify(binary: Path | str, timeout: int = 45) -> tuple[bool, str, int | None]:
+    """Run ``llama-server --version``. Returns (ok, detail, return code)."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        proc = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=timeout,
+                              env=runtime_env(binary), cwd=str(Path(binary).parent), creationflags=flags)
+    except subprocess.TimeoutExpired:
+        return False, "llama-server did not answer --version in time", None
+    except OSError as exc:
+        return False, f"cannot execute llama-server: {exc}", None
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode == 0:
+        line = next((ln for ln in output.splitlines() if "version" in ln.lower()), output.splitlines()[0] if output else "")
+        return True, line.strip(), 0
+    return False, f"exit code {proc.returncode}: {output[-700:]}", proc.returncode
+
+
+def check() -> dict[str, Any]:
+    """Run the installed engine and report whether it works (used by the UI and ``cts doctor``)."""
+    info = runtime_info()
+    if not info["installed"]:
+        return {**info, "ok": False, "detail": "llama.cpp is not installed", "hint": ""}
+    ok, detail, code = verify(info["path"])
+    return {**info, "ok": ok, "detail": detail, "hint": "" if ok else deps.hint_for(detail, code)}
+
+
+# ----------------------------------------------------------------------- choosing assets
+def _flavors_of(name: str) -> set[str]:
+    lowered = name.lower()
+    return {f for f in _FLAVORS if f in lowered}
+
+
+def rank_assets(assets: list[dict[str, Any]], system: str, arch: str, flavor: str = "") -> list[dict[str, Any]]:
+    """Archives that fit this machine, best first. The plain CPU build is always the last resort.
+
+    Windows/Linux prefer Vulkan (any GPU vendor, no CUDA toolkit needed); macOS builds include
+    Metal. ``flavor`` (or CTS_LLAMA_FLAVOR) forces ``cpu``, ``vulkan``, ``cuda``...
     """
     os_token = {"windows": "win", "macos": "macos", "linux": "ubuntu"}.get(system, system)
-    candidates = []
+    candidates: list[dict[str, Any]] = []
     for asset in assets:
         name = asset.get("name", "").lower()
         if not name.startswith("llama-") or "-bin-" not in name or not name.endswith(_ARCHIVE_SUFFIXES):
             continue
-        if os_token not in name:
+        if f"-{os_token}-" not in name:
             continue
         if arch == "arm64" and "arm64" not in name:
             continue
         if arch == "x64" and ("arm64" in name or not ("x64" in name or "x86_64" in name or "amd64" in name)):
             continue
         candidates.append(asset)
-    if not candidates:
-        return None
 
-    def flavors_of(asset: dict[str, Any]) -> set[str]:
-        return {f for f in _FLAVORS if f in asset["name"].lower()}
-
+    by_len = lambda items: sorted(items, key=lambda a: len(a["name"]))  # noqa: E731 - shortest name = least exotic
+    plain = by_len([a for a in candidates if not _flavors_of(a["name"])])
     wanted = flavor.lower().strip()
+    ordered: list[dict[str, Any]] = []
     if wanted and wanted != "cpu":
-        match = [a for a in candidates if wanted in flavors_of(a)]
+        ordered += by_len([a for a in candidates if wanted in _flavors_of(a["name"])])
+    elif not wanted and system in ("windows", "linux"):
+        ordered += by_len([a for a in candidates if _flavors_of(a["name"]) == {"vulkan"}])
+    ordered += plain
+    unique: list[dict[str, Any]] = []
+    for asset in ordered:
+        if asset not in unique:
+            unique.append(asset)
+    return unique
+
+
+def pick_asset(assets: list[dict[str, Any]], system: str, arch: str, flavor: str = "") -> dict[str, Any] | None:
+    ranked = rank_assets(assets, system, arch, flavor)
+    return ranked[0] if ranked else None
+
+
+def companion_assets(assets: list[dict[str, Any]], primary: dict[str, Any]) -> list[dict[str, Any]]:
+    """CUDA builds need the separate ``cudart`` archive (CUDA runtime DLLs/libs) next to the binaries."""
+    match = re.search(r"cuda-[\d.]+-(?:x64|arm64)", primary["name"].lower())
+    if not match:
+        return []
+    return [a for a in assets if a.get("name", "").lower().startswith("cudart-") and match.group(0) in a["name"].lower()]
+
+
+def synthesize_assets(tag: str, system: str, arch: str) -> list[dict[str, Any]]:
+    """Asset names derived from llama.cpp's release naming scheme (used when the API is unavailable)."""
+    names: list[str] = []
+    if system == "macos":
+        names = [f"llama-{tag}-bin-macos-{arch}.tar.gz"]
+    elif system == "linux":
+        names = [f"llama-{tag}-bin-ubuntu-vulkan-{arch}.tar.gz", f"llama-{tag}-bin-ubuntu-{arch}.tar.gz"]
+    elif system == "windows":
+        if arch == "x64":
+            names.append(f"llama-{tag}-bin-win-vulkan-x64.zip")
+        names.append(f"llama-{tag}-bin-win-cpu-{arch}.zip")
+    return [{"name": n, "size": 0, "browser_download_url": f"{GITHUB}/releases/download/{tag}/{n}"} for n in names]
+
+
+# --------------------------------------------------------------------------- releases
+def _github_headers() -> dict[str, str]:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "CTS-comic-to-story"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def latest_release(client: httpx.Client) -> dict[str, Any]:
+    """Newest release as {tag_name, assets, source}. Falls back to the website when the API fails
+    (rate limit of 60 requests/hour per IP, corporate proxies...)."""
+    api_error = ""
+    try:
+        resp = client.get(RELEASES_API, headers=_github_headers())
+        if resp.status_code == 200:
+            data = resp.json()
+            return {"tag_name": data["tag_name"], "assets": data.get("assets", []), "source": "api"}
+        api_error = f"GitHub API answered {resp.status_code}"
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        api_error = str(exc)
+    try:
+        resp = client.get(RELEASES_LATEST, follow_redirects=False, headers={"User-Agent": "CTS-comic-to-story"})
+        location = resp.headers.get("location", "") or str(resp.url)
+        match = re.search(r"/releases/tag/([^/?#]+)", location)
         if match:
-            return sorted(match, key=lambda a: len(a["name"]))[0]
-    elif system in ("windows", "linux") and not wanted:
-        vulkan = [a for a in candidates if flavors_of(a) == {"vulkan"}]
-        if vulkan:
-            return sorted(vulkan, key=lambda a: len(a["name"]))[0]
-    plain = [a for a in candidates if not flavors_of(a)]
-    pool = plain or candidates
-    return sorted(pool, key=lambda a: len(a["name"]))[0]
+            return {"tag_name": match.group(1), "assets": [], "source": "redirect"}
+        raise RuntimeError(f"unexpected answer from github.com ({resp.status_code})")
+    except (httpx.HTTPError, RuntimeError) as exc:
+        raise RuntimeError(f"Could not reach GitHub to find the latest llama.cpp ({api_error}; {exc}). {MANUAL_HELP}") from exc
 
 
+# ----------------------------------------------------------------------------- install
 def _extract(archive: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     root = dest.resolve()
+
+    def inside(name: str) -> bool:
+        target = (dest / name).resolve()
+        return target == root or root in target.parents
+
     if archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
-            for info in zf.infolist():
-                target = (dest / info.filename).resolve()
-                if root not in target.parents and target != root:
-                    raise RuntimeError("Unsafe path in archive")
+            if not all(inside(info.filename) for info in zf.infolist()):
+                raise RuntimeError("Unsafe path in archive")
             zf.extractall(dest)
     else:
         with tarfile.open(archive) as tf:
-            for member in tf.getmembers():
-                target = (dest / member.name).resolve()
-                if root not in target.parents and target != root:
-                    raise RuntimeError("Unsafe path in archive")
-            tf.extractall(dest)
+            if not all(inside(member.name) for member in tf.getmembers()):
+                raise RuntimeError("Unsafe path in archive")
+            try:
+                tf.extractall(dest, filter="data")  # Python 3.12+ (and security backports)
+            except TypeError:
+                tf.extractall(dest)
+
+
+def _make_executable(folder: Path) -> None:
+    if os.name == "nt":
+        return
+    for item in folder.rglob("*"):
+        if item.is_file() and not item.is_symlink() and (item.name.startswith("llama-") or item.suffix == ""):
+            item.chmod(item.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _flavor_label(name: str) -> str:
+    flavors = sorted(_flavors_of(name))
+    if flavors:
+        return "+".join(flavors)
+    return "metal" if "macos" in name.lower() else "cpu"
+
+
+def _install_asset(
+    client: httpx.Client, tag: str, asset: dict[str, Any], companions: list[dict[str, Any]],
+    on_progress: Progress | None, is_cancelled: Callable[[], bool],
+) -> tuple[Path, str]:
+    """Download, unpack, verify (and repair) one build. Returns (server path, flavor label)."""
+    flavor = _flavor_label(asset["name"])
+    downloads = runtime_dir() / "downloads"
+    staging = runtime_dir() / f"{tag}-{flavor}.tmp"
+    final = runtime_dir() / f"{tag}-{flavor}"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        for item in [asset, *companions]:
+            label = f"Downloading {item['name']}"
+            total = int(item.get("size", 0) or 0)
+            archive = downloads / item["name"]
+            if on_progress:
+                on_progress(label, 0, total)
+            download_file(
+                item["browser_download_url"], archive, expected_size=total,
+                on_progress=(lambda n, label=label, total=total: on_progress(label, n, total)) if on_progress else None,
+                is_cancelled=is_cancelled, client=client,
+            )
+            if on_progress:
+                on_progress(f"Unpacking {item['name']}", 0, 0)
+            try:
+                _extract(archive, staging)
+            except (tarfile.TarError, zipfile.BadZipFile, EOFError, OSError) as exc:
+                archive.unlink(missing_ok=True)  # a corrupt download must not be reused
+                raise RuntimeError(f"{item['name']} is damaged ({exc}); download it again") from exc
+        server = next((p for p in sorted(staging.rglob(EXE)) if p.is_file()), None)
+        if server is None:
+            raise RuntimeError(f"llama-server was not found inside {asset['name']}")
+        _make_executable(staging)
+
+        if on_progress:
+            on_progress("Checking that llama.cpp starts", 0, 0)
+        ok, detail, code = verify(server)
+        if not ok:
+            changed, message = deps.try_fix(detail, code, str(server))
+            if on_progress:
+                on_progress(message[:140] or "Repairing", 0, 0)
+            if changed:
+                ok, detail, code = verify(server)
+            if not ok:
+                hint = deps.hint_for(detail, code) or message
+                raise RuntimeError(f"it does not start on this computer ({detail[:200]}). {hint}".strip())
+
+        shutil.rmtree(final, ignore_errors=True)
+        os.replace(staging, final)
+        relative = server.relative_to(staging)
+        return final / relative, flavor
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _cleanup_old(keep_name: str) -> None:
+    """Remove superseded engines, leftovers of failed installs and cached archives.
+
+    Compared by folder *name*: paths can differ by symlinks (macOS /var -> /private/var) and
+    deleting the engine we just installed would be the worst possible outcome.
+    """
+    for child in runtime_dir().iterdir():
+        if child.name in (keep_name, "current.json") or not child.is_dir():
+            continue
+        if child.name == "downloads" or child.suffix == ".tmp" or re.match(r"^b?\d+", child.name):
+            shutil.rmtree(child, ignore_errors=True)
 
 
 def install_runtime(
-    on_progress: Callable[[str, int, int], None] | None = None,
+    on_progress: Progress | None = None,
     is_cancelled: Callable[[], bool] = lambda: False,
+    update: bool = False,
+    repair: bool = False,
+    flavor: str | None = None,
+    client: httpx.Client | None = None,
 ) -> Path:
-    """Download the latest prebuilt llama.cpp for this OS and return the llama-server path."""
-    existing = find_server()
-    if existing:
-        return existing
+    """Make sure a working llama-server exists and return its path.
+
+    * default      - keep a working engine, install one if there is none (or it does not start);
+    * ``update``   - move a CTS-managed engine to the newest llama.cpp release;
+    * ``repair``   - reinstall even if an engine seems present.
+    """
     system, arch = system_arch()
-    with httpx.Client(timeout=30, follow_redirects=True) as client:
-        try:
-            resp = client.get(RELEASES_URL, headers={"Accept": "application/vnd.github+json"})
-            resp.raise_for_status()
-            release = resp.json()
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Could not reach the llama.cpp release page ({exc}). {MANUAL_HELP}") from exc
-        asset = pick_asset(release.get("assets", []), system, arch, os.environ.get("CTS_LLAMA_FLAVOR", ""))
-        if asset is None:
-            raise RuntimeError(f"No prebuilt llama.cpp found for {system}/{arch}. {MANUAL_HELP}")
-        tag = release.get("tag_name", "latest")
-        dest_dir = runtime_dir() / tag
-        archive = runtime_dir() / asset["name"]
-        if on_progress:
-            on_progress(f"Downloading llama.cpp {tag}", 0, int(asset.get("size", 0)))
-        download_file(
-            asset["browser_download_url"], archive, expected_size=int(asset.get("size", 0)),
-            on_progress=(lambda n: on_progress(f"Downloading llama.cpp {tag}", n, int(asset.get("size", 0))))
-            if on_progress else None,
-            is_cancelled=is_cancelled, client=client,
-        )
-    if on_progress:
-        on_progress("Unpacking llama.cpp", 0, 0)
-    _extract(archive, dest_dir)
-    archive.unlink(missing_ok=True)
-    server = next((p for p in dest_dir.rglob(EXE) if p.is_file()), None)
-    if server is None:
-        raise RuntimeError(f"llama-server was not found inside {asset['name']}. {MANUAL_HELP}")
-    if os.name != "nt":
-        for binary in server.parent.iterdir():
-            if binary.is_file() and not binary.suffix:
-                binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return server
+    wanted_flavor = flavor if flavor is not None else os.environ.get("CTS_LLAMA_FLAVOR", "")
+    existing = find_server()
+    managed = managed_info()
+    cts_owned = bool(existing) and (_inside_runtime(existing) or (managed is not None and Path(managed["path"]) == existing))
+
+    if existing and not repair:
+        ok, _detail, _code = verify(existing)
+        if ok and not cts_owned:
+            return existing  # brew/winget/PATH/CTS_LLAMA_SERVER installs are the user's to update
+        if ok and not update:
+            return existing
+
+    owns = client is None
+    client = client or httpx.Client(timeout=httpx.Timeout(30, read=120), follow_redirects=True)
+    try:
+        release = latest_release(client)
+        tag = release["tag_name"]
+        installed_tag = managed.get("tag", "") if managed else ""
+        if (existing and not repair and cts_owned and update and installed_tag
+                and tag_number(tag) <= tag_number(installed_tag) and verify(existing)[0]):
+            return existing  # already on the newest release
+        assets = release["assets"]
+        ranked = rank_assets(assets, system, arch, wanted_flavor) if assets else []
+        if not ranked:  # API unavailable, or its list had nothing for this machine
+            assets = synthesize_assets(tag, system, arch)
+            ranked = rank_assets(assets, system, arch, wanted_flavor)
+        if not ranked:
+            raise RuntimeError(f"No prebuilt llama.cpp for {system}/{arch}. {MANUAL_HELP}")
+
+        failures: list[str] = []
+        for asset in ranked:
+            try:
+                server, flavor_label = _install_asset(
+                    client, tag, asset, companion_assets(release["assets"], asset), on_progress, is_cancelled)
+            except (DownloadCancelled, KeyboardInterrupt):
+                raise
+            except Exception as exc:  # noqa: BLE001 - try the next build (e.g. Vulkan -> CPU)
+                failures.append(f"{asset['name']}: {exc}")
+                if on_progress:
+                    on_progress("That build did not work, trying another", 0, 0)
+                continue
+            _state_file().write_text(json.dumps({"tag": tag, "flavor": flavor_label, "path": str(server),
+                                                 "asset": asset["name"]}), encoding="utf-8")
+            _cleanup_old(_top_level(server).name)
+            return server
+        raise RuntimeError("llama.cpp could not be installed:\n  - " + "\n  - ".join(failures) + f"\n{MANUAL_HELP}")
+    finally:
+        if owns:
+            client.close()
+
+
+def _top_level(server: Path) -> Path:
+    """The folder directly under runtime/ that contains ``server``."""
+    base = runtime_dir().resolve()
+    for parent in server.resolve().parents:
+        if parent.parent == base:
+            return parent
+    return server.parent

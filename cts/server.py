@@ -53,6 +53,11 @@ class InstallIn(BaseModel):
     quant: str
 
 
+class RuntimeIn(BaseModel):
+    update: bool = False
+    repair: bool = False
+
+
 class SelectIn(BaseModel):
     id: str
 
@@ -178,9 +183,15 @@ def create_app() -> FastAPI:
             raise HTTPException(502, f"Could not reach Hugging Face: {exc}")
 
     @app.post("/api/local/runtime/install")
-    def install_runtime() -> dict[str, bool]:
-        local_models.start_runtime_install()
+    def install_runtime(body: RuntimeIn | None = None) -> dict[str, bool]:
+        body = body or RuntimeIn()
+        local_models.start_runtime_install(update=body.update, repair=body.repair)
         return {"ok": True}
+
+    @app.post("/api/local/runtime/check")
+    async def check_runtime() -> dict[str, Any]:
+        """Actually run llama-server --version, so a broken install is reported with a fix."""
+        return await run_in_threadpool(llama_runtime.check)
 
     @app.post("/api/local/install")
     def install_model(body: InstallIn) -> dict[str, str]:

@@ -242,3 +242,48 @@ def test_local_endpoints_without_network(client):
     assert state["installed"] == [] and len(state["curated"]) >= 4 and state["runtime"]["installed"] is False
     assert client.get("/api/local/repo", params={"repo": "not a repo"}).status_code == 400
     assert client.post("/api/local/select", json={"id": "nope"}).status_code == 404
+
+
+# ------------------------------------------------------------------ llama.cpp engine API (v0.2)
+def test_runtime_install_endpoint_passes_update_and_repair(client, monkeypatch):
+    from cts.local import models, runtime
+
+    seen = []
+    monkeypatch.setattr(runtime, "install_runtime", lambda progress=None, **kw: seen.append(kw) or None)
+    for body in (None, {"update": True}, {"repair": True}):
+        models.runtime_install.update(status="idle")
+        r = client.post("/api/local/runtime/install", json=body) if body is not None else client.post("/api/local/runtime/install")
+        assert r.status_code == 200
+        end = time.time() + 5
+        while time.time() < end and models.runtime_install["status"] == "running":
+            time.sleep(0.05)
+    assert seen == [{"update": False, "repair": False}, {"update": True, "repair": False}, {"update": False, "repair": True}]
+    assert client.get("/api/local/state").json()["runtime"]["install"]["status"] == "done"
+
+
+def test_runtime_install_errors_reach_the_ui(client, monkeypatch):
+    from cts.local import models, runtime
+
+    def fail(progress=None, **kw):
+        raise RuntimeError("llama.cpp could not be installed:\n  - x: it does not start")
+
+    monkeypatch.setattr(runtime, "install_runtime", fail)
+    models.runtime_install.update(status="idle")
+    client.post("/api/local/runtime/install", json={})
+    end = time.time() + 5
+    while time.time() < end and models.runtime_install["status"] == "running":
+        time.sleep(0.05)
+    inst = client.get("/api/local/state").json()["runtime"]["install"]
+    assert inst["status"] == "error" and "does not start" in inst["message"]
+
+
+def test_runtime_check_endpoint(client, tmp_path, monkeypatch):
+    assert client.post("/api/local/runtime/check").json()["ok"] is False
+    good = tmp_path / "llama-server"
+    good.write_text(f'#!{__import__("sys").executable}\nimport sys\nsys.stderr.write("version: 9 (x)\\n")\n')
+    good.chmod(0o755)
+    monkeypatch.setenv("CTS_LLAMA_SERVER", str(good))
+    res = client.post("/api/local/runtime/check").json()
+    assert res["ok"] and res["origin"] == "env" and "version: 9" in res["detail"]
+    state = client.get("/api/local/state").json()["runtime"]
+    assert state["installed"] and state["origin"] == "env"

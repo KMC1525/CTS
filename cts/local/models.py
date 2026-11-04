@@ -157,25 +157,25 @@ def _install_worker(iid: str, repo: str, quant: str, token: str) -> None:
 runtime_install: dict[str, Any] = {"status": "idle", "message": "", "done": 0, "total": 0}
 
 
-def start_runtime_install() -> None:
+def start_runtime_install(update: bool = False, repair: bool = False) -> None:
+    """Install / update / repair the llama.cpp engine in a background thread (progress is polled)."""
     with _lock:
         if runtime_install["status"] == "running":
             return
-        runtime_install.update(status="running", message="Preparing...", done=0, total=0)
+        runtime_install.update(status="running", message="Preparing...", done=0, total=0, detail="")
 
     def work() -> None:
         try:
             def progress(msg: str, done: int, total: int) -> None:
                 runtime_install.update(message=msg, done=done, total=total)
 
-            runtime.install_runtime(progress)
-            runtime_install.update(status="done", message="Installed")
+            runtime.install_runtime(progress, update=update, repair=repair)
+            runtime_install.update(status="done", message="Ready", done=0, total=0)
         except Exception as exc:  # noqa: BLE001
-            runtime_install.update(status="error", message=str(exc)[:600])
+            runtime_install.update(status="error", message=str(exc)[:900])
 
     threading.Thread(target=work, daemon=True).start()
 
 
 def runtime_status() -> dict[str, Any]:
-    server = runtime.find_server()
-    return {"installed": bool(server), "path": str(server) if server else "", "install": dict(runtime_install)}
+    return {**runtime.runtime_info(), "install": dict(runtime_install)}

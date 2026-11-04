@@ -7,6 +7,7 @@ let settings = null;
 let local = { curated: [], installed: [], installs: [], runtime: {}, active: '' };
 let repoInfo = null;        // result of /api/local/repo
 let chosenQuant = '';
+let runtimeCheck = null;    // result of the last "Check" (runs llama-server --version)
 let clearKey = false;       // the user pressed "Clear" for the current provider's key
 let poll = null;
 let onChange = () => {};
@@ -40,7 +41,19 @@ export async function initSettings(opts, changed) {
   $('#l-custom').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); searchRepos(); } });
   $('#l-install').addEventListener('click', installModel);
   $('#runtime-btn').addEventListener('click', async () => {
-    try { await api.post('/api/local/runtime/install'); startPolling(); } catch (e) { toast(e.message, 'err'); }
+    const mode = $('#runtime-btn').dataset.mode || 'install';
+    try {
+      await api.post('/api/local/runtime/install', { update: mode === 'update', repair: mode === 'repair' });
+      runtimeCheck = null;
+      startPolling();
+      await refreshLocal();
+    } catch (e) { toast(e.message, 'err'); }
+  });
+  $('#runtime-check-btn').addEventListener('click', async () => {
+    const btn = $('#runtime-check-btn');
+    btn.disabled = true; btn.textContent = 'Checking...';
+    try { runtimeCheck = await api.post('/api/local/runtime/check'); } catch (e) { toast(e.message, 'err'); }
+    finally { btn.disabled = false; btn.textContent = 'Check'; renderLocal(); }
   });
 
   // context presets
@@ -131,14 +144,30 @@ function renderLocal() {
   // engine
   const rt = local.runtime || {};
   const inst = rt.install || {};
-  $('#runtime-text').textContent = rt.installed ? `Ready (${rt.path})` : inst.status === 'running' ? inst.message : inst.status === 'error' ? inst.message : 'Not installed yet - needed to run local models.';
-  $('#runtime-text').style.color = inst.status === 'error' ? 'var(--err)' : '';
-  $('#runtime-btn').hidden = Boolean(rt.installed);
-  $('#runtime-btn').disabled = inst.status === 'running';
-  $('#runtime-btn').textContent = inst.status === 'error' ? 'Retry' : 'Install llama.cpp';
+  const engineBusy = inst.status === 'running';
+  const label = rt.tag ? `llama.cpp ${rt.tag}${rt.flavor ? ` (${rt.flavor})` : ''}` : 'llama.cpp';
+  const broken = runtimeCheck && !runtimeCheck.ok;
+  $('#runtime-text').textContent = engineBusy ? inst.message
+    : rt.installed ? `Ready - ${label}${rt.origin === 'system' ? ' (installed on your system)' : ''}`
+    : 'Not installed yet - needed to run local models.';
+  $('#runtime-text').style.color = '';
+  const btn = $('#runtime-btn');
+  btn.dataset.mode = !rt.installed ? 'install' : (broken || inst.status === 'error') ? 'repair' : rt.origin === 'cts' ? 'update' : 'repair';
+  btn.textContent = { install: 'Install llama.cpp', update: 'Update', repair: 'Repair' }[btn.dataset.mode];
+  btn.hidden = Boolean(rt.installed && rt.origin !== 'cts' && !broken && inst.status !== 'error');
+  btn.disabled = engineBusy;
+  $('#runtime-check-btn').hidden = !rt.installed;
   const rp = $('#runtime-progress');
-  rp.hidden = inst.status !== 'running';
-  if (inst.status === 'running') setBar(rp, inst.done, inst.total);
+  rp.hidden = !engineBusy;
+  if (engineBusy) setBar(rp, inst.done, inst.total);
+  const hint = $('#runtime-hint');
+  let hintText = '', hintKind = '';
+  if (inst.status === 'error') { hintText = inst.message; hintKind = 'err'; }
+  else if (broken) { hintText = `${runtimeCheck.detail}${runtimeCheck.hint ? `\n${runtimeCheck.hint}` : ''}`; hintKind = 'err'; }
+  else if (runtimeCheck && runtimeCheck.ok) { hintText = `Works: ${runtimeCheck.detail}`; hintKind = 'ok'; }
+  hint.hidden = !hintText || engineBusy;
+  hint.textContent = hintText;
+  hint.className = `hint hint-box ${hintKind}`;
 
   // model select (keep the user's current choice while polling)
   const sel = $('#l-model');
@@ -256,7 +285,7 @@ function startPolling() {
     try { local = await api.get('/api/local/state'); } catch { return; }
     renderLocal();
     const nowRunning = (local.installs || []).some((i) => i.status === 'running') || local.runtime?.install?.status === 'running';
-    if (wasRunning && !nowRunning) { await reloadSettings(); setProviderType(settings.provider_type); toast('Installation finished.', 'ok'); }
+    if (wasRunning && !nowRunning) { runtimeCheck = null; await reloadSettings(); setProviderType(settings.provider_type); toast('Installation finished.', 'ok'); }
   }, 1000);
 }
 

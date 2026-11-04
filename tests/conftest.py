@@ -32,6 +32,17 @@ def cts_home(tmp_path, monkeypatch):
     jobs.manager = None
 
 
+@pytest.fixture(autouse=True)
+def no_system_changes(monkeypatch):
+    """Tests must never install real system packages (apt/dnf/winget...). Tests that care override these."""
+    from cts.local import deps
+
+    calls = []
+    monkeypatch.setattr(deps, "install_system_packages", lambda libs, *a, **k: (calls.append(("pkgs", libs)) or (False, "fake: not installed")))
+    monkeypatch.setattr(deps, "install_vc_redist", lambda *a, **k: (calls.append(("vcredist",)) or (False, "fake: not installed")))
+    return calls
+
+
 @pytest.fixture
 def mock_llm():
     servers: list[MockLLM] = []

@@ -10,7 +10,7 @@
 - **A clean, dark web UI** (plain HTML, CSS and JavaScript - no build step) that runs locally on your computer.
 - **Private by default:** everything runs on your machine; CrewAI telemetry is switched off. Comic pages only leave your computer if *you* pick a hosted AI provider.
 
-> **Status: early release (v0.1).** The pipeline, UI and Linux installer have been exercised end to end. The Windows and macOS installers follow the same design but have not been verified on real machines yet - please [open an issue](https://github.com/KMC1525/CTS/issues) if anything misbehaves.
+> **Status: v0.2 (early release).** The pipeline, UI and Linux installer have been exercised end to end, and the llama.cpp installer is covered by tests that simulate GitHub releases. The Windows and macOS installers follow the same design but have not been verified on real machines yet - please [open an issue](https://github.com/KMC1525/CTS/issues) if anything misbehaves. See the [changelog](CHANGELOG.md) for what is new.
 
 ---
 
@@ -37,9 +37,10 @@ When it finishes, open **CTS** from your applications list, or run `cts` in a te
 
 1. Installs [`uv`](https://docs.astral.sh/uv/) if it is missing (it can fetch the right Python for you).
 2. Creates a private Python 3.12 environment (`~/.cts` on macOS/Linux, `%LOCALAPPDATA%\Programs\CTS` on Windows).
-3. Installs CTS and every dependency into it.
-4. Downloads the prebuilt [llama.cpp](https://github.com/ggml-org/llama.cpp) engine used for local models (skipped with a warning if it cannot be downloaded - you can retry from *Settings*).
-5. Adds CTS to your applications list and puts a `cts` command on your `PATH`.
+3. Installs CTS and **every** dependency into it (CrewAI with its Anthropic and Gemini clients, FastAPI, Pillow, python-docx, ReportLab...).
+4. Installs the prebuilt [llama.cpp](https://github.com/ggml-org/llama.cpp) engine used for local models, **runs it to check that it starts**, and installs the system libraries it needs when it can (see [llama.cpp engine](#the-llamacpp-engine)). If this step fails, the rest of CTS is still installed and you can retry later.
+5. Runs `cts doctor --fix`, which checks every library and repairs what is missing.
+6. Adds CTS to your applications list and puts a `cts` command on your `PATH`.
 
 Options when you run the script from a checkout: `--no-runtime`, `--no-desktop`, `--dev` (editable install), `--uninstall`, `--purge` (Windows: `-NoRuntime`, `-NoDesktop`, `-Dev`, `-Uninstall`, `-Purge`). Set `CTS_REF` to install a different branch or tag.
 
@@ -48,6 +49,10 @@ If `uv` cannot be installed, the scripts fall back to a system Python 3.10-3.13.
 **Uninstall:** `./install.sh --uninstall` (add `--purge` to also delete your settings, models and novels), or on Windows `.\install.ps1 -Uninstall`.
 
 </details>
+
+### Updating
+
+Run the same install command again, or run `cts update`. An update **reinstalls CTS from the latest code, upgrades every Python library, updates llama.cpp to its newest release (and re-checks its system libraries), and refreshes your applications-menu entry.** Your settings, models, uploaded volumes and generated novels are kept. To update only the llama.cpp engine, use `cts setup-runtime --update` or the **Update** button in *Settings → Local models*.
 
 ---
 
@@ -139,12 +144,26 @@ The model **must accept images**. The model name box accepts any model id, so ne
 
 CTS runs local models with [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. In *Settings → Local models*:
 
-1. Press **Install llama.cpp** (the installer usually already did this).
+1. Make sure the engine is ready - the installer normally did this; otherwise press **Install llama.cpp** (see [below](#the-llamacpp-engine)).
 2. Choose a curated vision model, or **Other Hugging Face repository...** to search or paste any `owner/model-GGUF` repo.
 3. Press **Show quantizations** and pick one. Smaller (`Q4_K_M`, `IQ4_XS`...) is faster and lighter; larger (`Q6_K`, `Q8_0`) is closer to the original quality. Sizes are shown before you download.
 4. Press **Install**. The model and its vision projector (`mmproj`) are downloaded with progress, and the download resumes if interrupted.
 
 The model must be **vision-capable** (a repository that ships an `mmproj` file) or it cannot read comic pages. Gated models need a Hugging Face token (*Settings → Local models*).
+
+### The llama.cpp engine
+
+CTS downloads the official prebuilt llama.cpp for your system and manages it for you:
+
+- **Picks the right build.** macOS: the native build (Metal GPU support is included). Windows and Linux: the **Vulkan** build (works with NVIDIA, AMD and Intel GPUs without extra toolkits), with the plain **CPU** build as an automatic fallback.
+- **Checks that it works.** The engine is run (`llama-server --version`) before CTS accepts it. If a GPU build does not start on your machine, CTS installs the CPU build instead.
+- **Installs missing system libraries.** On Linux it detects a missing `libgomp` / `libvulkan` and installs it with your package manager when it can (as root, or with passwordless `sudo`); otherwise it prints the exact command to run. On Windows it installs the Microsoft Visual C++ Redistributable with `winget` when the engine reports a missing DLL.
+- **Updates.** *Settings → Local models → Update* (or `cts setup-runtime --update`) moves to the newest llama.cpp release; new model families often need a newer engine.
+- **Works around GitHub limits.** If the GitHub API is rate-limited or blocked, CTS reads the latest release from the website instead. Set `GITHUB_TOKEN` to raise the API limit.
+- **Installs safely.** The engine is unpacked into a temporary folder and only moved into place once it works, so a failed install never leaves a broken engine behind.
+- **Respects yours.** If `llama-server` is already on your `PATH` (for example from `brew` or `winget`) or set with `CTS_LLAMA_SERVER`, CTS uses it and never replaces it.
+
+**Troubleshooting:** run `cts doctor` (add `--fix` to repair). In *Settings → Local models*, **Check** runs the engine and shows the exact error, and **Repair** reinstalls it. To force a build, run `cts setup-runtime --repair --flavor cpu` (or `vulkan`, `cuda`...); `cuda` builds also download the matching CUDA runtime archive. To use your own build, set `CTS_LLAMA_SERVER` to the `llama-server` binary.
 
 ---
 
@@ -159,7 +178,9 @@ The quality of the novels and of the page analysis is driven by Markdown system 
 | `cts` / `cts launch` | Start CTS in the background (if needed) and open it in the browser. |
 | `cts serve` | Run the server in this terminal (`--port`, `--no-browser`). |
 | `cts stop` | Stop the background server. |
-| `cts setup-runtime` | Download the llama.cpp engine for local models. |
+| `cts update` | Update CTS, all its Python libraries and llama.cpp (re-runs the installer). |
+| `cts doctor` | Check every library CTS needs, including llama.cpp and its system libraries. `--fix` repairs what is missing. |
+| `cts setup-runtime` | Install the llama.cpp engine. `--update` moves to the newest release, `--repair` reinstalls it, `--flavor cpu\|vulkan\|cuda` forces a build. |
 | `cts install-desktop` / `cts uninstall-desktop` | Add/remove CTS in your applications list. |
 | `cts info` | Show the data folder, custom-prompt folder and engine status. |
 | `cts purge --yes` | Delete all CTS data (settings, models, uploads, novels). |

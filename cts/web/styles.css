@@ -269,6 +269,10 @@ dialog[open] { animation: pop .18s ease both; }
 .card { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px; }
 .card h3 { font-size: 13.5px; font-weight: 650; margin-bottom: 12px; }
 .stack { display: flex; flex-direction: column; gap: 2px; }
+.btn-row { display: flex; gap: 8px; flex: none; }
+.hint-box { white-space: pre-wrap; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px; margin: 0 0 12px; word-break: break-word; }
+.hint-box.err { color: #fecaca; border-color: #5b2323; background: #251414; }
+.hint-box.ok { color: #bbf7d0; border-color: #1f3d2a; background: #11201a; }
 .stack > .ghost { align-self: flex-start; margin: 2px 0 14px; }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 10px; }
 .small-dlg { width: min(440px, 92vw); padding: 24px; }

@@ -14,7 +14,7 @@ from typing import Callable
 import httpx
 
 from ..paths import logs_dir
-from . import models, runtime
+from . import deps, models, runtime
 
 
 class LocalServerError(RuntimeError):
@@ -66,10 +66,8 @@ class LlamaServer:
             self._port = self._free_port()
             cmd = [str(binary), "-m", str(main), "--mmproj", str(mmproj), "-c", str(context_window),
                    "-np", "1", "--host", "127.0.0.1", "--port", str(self._port), "--jinja", "-ngl", "99"]
-            env = dict(os.environ)
+            env = runtime.runtime_env(binary)
             lib_dir = str(Path(binary).parent)
-            for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
-                env[var] = lib_dir + os.pathsep + env.get(var, "")
             log_path = logs_dir() / "llama-server.log"
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             on_status("Loading the local model (this can take a minute)...")
@@ -94,8 +92,9 @@ class LlamaServer:
                     raise LocalServerError("Cancelled while loading the model")
                 if self._proc is None or self._proc.poll() is not None:
                     tail = log_path.read_text(errors="replace")[-1200:] if log_path.exists() else ""
-                    raise LocalServerError("llama-server stopped while loading the model. Is there enough RAM for "
-                                           f"this model/context size?\n{tail}")
+                    code = self._proc.returncode if self._proc is not None else None
+                    hint = deps.hint_for(tail, code) or "Is there enough RAM for this model and context size?"
+                    raise LocalServerError(f"llama-server stopped while loading the model. {hint}\n{tail}")
                 try:
                     if client.get(url).status_code == 200:
                         return

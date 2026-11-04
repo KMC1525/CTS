@@ -186,9 +186,13 @@
         <div id="panel-local" class="stack" hidden>
           <div class="row-between" id="runtime-row">
             <div><strong>Engine (llama.cpp)</strong><p class="hint" id="runtime-text">Checking...</p></div>
-            <button type="button" class="ghost" id="runtime-btn">Install</button>
+            <div class="btn-row">
+              <button type="button" class="ghost" id="runtime-check-btn" hidden>Check</button>
+              <button type="button" class="ghost" id="runtime-btn">Install</button>
+            </div>
           </div>
           <div class="progress slim" id="runtime-progress" hidden><span></span></div>
+          <p class="hint hint-box" id="runtime-hint" hidden></p>
 
           <label class="field"><span class="label">Model</span><select id="l-model"></select></label>
           <label class="field" id="l-custom-field" hidden><span class="label">Hugging Face repo</span>

@@ -4,8 +4,11 @@
 #   curl -fsSL https://raw.githubusercontent.com/KMC1525/CTS/main/install.sh | bash
 #
 # What it does: installs `uv` (a tiny Python manager) if needed, creates a private Python 3.12
-# environment in ~/.cts, installs CTS and every library it needs, downloads the llama.cpp engine
-# for local models, and adds CTS to your applications menu.
+# environment in ~/.cts, installs CTS and every library it needs, installs (or updates) the llama.cpp
+# engine for local models together with the system libraries it needs, checks that everything works
+# (`cts doctor`), and adds CTS to your applications menu.
+#
+# Running it again UPDATES everything: CTS itself, all Python libraries and llama.cpp.
 #
 # Options (when running the file directly):  --no-runtime  --no-desktop  --dev  --uninstall  --purge
 # Environment:  CTS_REF (branch/tag, default main)  CTS_INSTALL_HOME (default ~/.cts)  CTS_BIN_DIR (default ~/.local/bin)
@@ -18,7 +21,7 @@ main() {
   local BIN_DIR="${CTS_BIN_DIR:-$HOME/.local/bin}"
   local PY_VERSION="${CTS_PYTHON:-3.12}"
   local VENV="$INSTALL_HOME/venv"
-  local DO_RUNTIME=1 DO_DESKTOP=1 DEV=0 UNINSTALL=0 PURGE=0
+  local DO_RUNTIME=1 DO_DESKTOP=1 DEV=0 UNINSTALL=0 PURGE=0 RUNTIME_FAILED=0
 
   for arg in "$@"; do
     case "$arg" in
@@ -85,6 +88,10 @@ main() {
   fi
 
   mkdir -p "$INSTALL_HOME" "$BIN_DIR"
+  if [ -x "$VENV/bin/cts" ]; then
+    say "Updating an existing installation"
+    "$VENV/bin/cts" stop >/dev/null 2>&1 || true
+  fi
   local PIP_ARGS=("$SRC")
   if [ "$DEV" = 1 ] && [ -d "$SRC" ]; then PIP_ARGS=(-e "$SRC"); fi
 
@@ -92,7 +99,10 @@ main() {
     say "Creating a private Python $PY_VERSION environment"
     uv venv --python "$PY_VERSION" --allow-existing "$VENV" >/dev/null || die "uv could not create the environment."
     say "Installing CTS and its libraries (CrewAI, FastAPI, Pillow...). This can take a few minutes."
-    uv pip install --python "$VENV/bin/python" --upgrade "${PIP_ARGS[@]}" || die "Installing the Python packages failed."
+    # --reinstall-package/--refresh-package: always take the new CTS code, even if the version string
+    # is unchanged and a download is cached; --upgrade brings every dependency to its newest allowed release.
+    uv pip install --python "$VENV/bin/python" --upgrade --reinstall-package comic-to-story \
+      --refresh-package comic-to-story "${PIP_ARGS[@]}" || die "Installing the Python packages failed."
   else
     warn "uv is unavailable - falling back to your system Python."
     local PY=""
@@ -105,6 +115,7 @@ main() {
     [ -n "$PY" ] || die "Python 3.10-3.13 is required. Install it (macOS: brew install python@3.12 / Linux: your package manager) and re-run."
     "$PY" -m venv "$VENV" || die "Could not create a virtual environment (on Debian/Ubuntu: sudo apt install python3-venv)."
     "$VENV/bin/python" -m pip install --quiet --upgrade pip
+    "$VENV/bin/python" -m pip install --force-reinstall --no-deps "${PIP_ARGS[@]}" || die "Installing CTS failed."
     "$VENV/bin/python" -m pip install --upgrade "${PIP_ARGS[@]}" || die "Installing the Python packages failed."
   fi
 
@@ -112,8 +123,8 @@ main() {
 
   # --------------------------------------------------------- llama.cpp (local AI)
   if [ "$DO_RUNTIME" = 1 ]; then
-    say "Installing the llama.cpp engine (runs local GGUF models)"
-    "$VENV/bin/cts" setup-runtime || warn "Skipped. You can install it later from Settings > Local models."
+    say "Installing / updating the llama.cpp engine (runs local GGUF models)"
+    "$VENV/bin/cts" setup-runtime --update || { RUNTIME_FAILED=1; warn "Skipped. Retry with: cts setup-runtime --repair  (or from Settings > Local models)."; }
   fi
 
   # -------------------------------------------------------- applications menu
@@ -122,7 +133,13 @@ main() {
     "$VENV/bin/cts" install-desktop --exec "$BIN_DIR/cts" || warn "Could not add CTS to the applications menu."
   fi
 
-  say "CTS is installed."
+  say "Checking that every library works"
+  DOCTOR_ARGS=(--fix)
+  # llama.cpp was just attempted above - do not try (and report) it a second time
+  if [ "$DO_RUNTIME" != 1 ] || [ "$RUNTIME_FAILED" = 1 ]; then DOCTOR_ARGS+=(--no-runtime); fi
+  "$VENV/bin/cts" doctor "${DOCTOR_ARGS[@]}" || warn "Some checks failed - see above. You can re-run: cts doctor --fix"
+
+  say "CTS $("$VENV/bin/cts" --version 2>/dev/null | awk '{print $2}') is installed."
   case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "Add $BIN_DIR to your PATH to use the 'cts' command:  export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
   if [ "$OS" = macos ]; then
     echo "Open it from Launchpad / Spotlight (search for CTS), or run:  cts"
