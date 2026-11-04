@@ -40,8 +40,12 @@ from . import deps
 from .download import DownloadCancelled, download_file
 
 GITHUB = "https://github.com/ggml-org/llama.cpp"
-RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-RELEASES_LATEST = f"{GITHUB}/releases/latest"
+# NOTE: llama.cpp publishes every build as a *pre-release* (tags b12111, b12112...). GitHub's
+# "latest release" endpoint ignores pre-releases and answers with an unrelated release (e.g. v0.9.0), so it
+# must never be used: list the releases and keep the ones tagged b<number>.
+RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=40"
+RELEASES_ATOM = f"{GITHUB}/releases.atom"
+BUILD_TAG = re.compile(r"^b\d+$")
 EXE = "llama-server.exe" if os.name == "nt" else "llama-server"
 _FLAVORS = ("cuda", "vulkan", "hip", "rocm", "sycl", "opencl", "kleidiai", "musa", "openvino", "adreno", "cann",
             "aclnn", "snapdragon", "zdnn")
@@ -240,27 +244,43 @@ def _github_headers() -> dict[str, str]:
     return headers
 
 
-def latest_release(client: httpx.Client) -> dict[str, Any]:
-    """Newest release as {tag_name, assets, source}. Falls back to the website when the API fails
-    (rate limit of 60 requests/hour per IP, corporate proxies...)."""
-    api_error = ""
+def release_candidates(client: httpx.Client, limit: int = 4) -> list[dict[str, Any]]:
+    """The newest llama.cpp builds, newest first, as [{tag_name, assets, source}].
+
+    Only tags shaped like ``b12111`` count: other releases in the repository (``v0.9.0``...) have no
+    binaries. Uses the GitHub API and, when that is rate-limited or blocked (60 requests/hour per IP),
+    the public releases feed, which has no such limit.
+    """
+    problems: list[str] = []
     try:
         resp = client.get(RELEASES_API, headers=_github_headers())
         if resp.status_code == 200:
-            data = resp.json()
-            return {"tag_name": data["tag_name"], "assets": data.get("assets", []), "source": "api"}
-        api_error = f"GitHub API answered {resp.status_code}"
-    except (httpx.HTTPError, ValueError, KeyError) as exc:
-        api_error = str(exc)
+            found = [r for r in resp.json() if BUILD_TAG.match(str(r.get("tag_name", ""))) and not r.get("draft")]
+            found.sort(key=lambda r: tag_number(r["tag_name"]), reverse=True)
+            if found:
+                return [{"tag_name": r["tag_name"], "assets": r.get("assets", []), "source": "api"} for r in found[:limit]]
+            problems.append("the GitHub API listed no llama.cpp builds")
+        else:
+            problems.append(f"GitHub API answered {resp.status_code}")
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        problems.append(f"GitHub API: {exc}")
     try:
-        resp = client.get(RELEASES_LATEST, follow_redirects=False, headers={"User-Agent": "CTS-comic-to-story"})
-        location = resp.headers.get("location", "") or str(resp.url)
-        match = re.search(r"/releases/tag/([^/?#]+)", location)
-        if match:
-            return {"tag_name": match.group(1), "assets": [], "source": "redirect"}
-        raise RuntimeError(f"unexpected answer from github.com ({resp.status_code})")
-    except (httpx.HTTPError, RuntimeError) as exc:
-        raise RuntimeError(f"Could not reach GitHub to find the latest llama.cpp ({api_error}; {exc}). {MANUAL_HELP}") from exc
+        resp = client.get(RELEASES_ATOM, headers={"User-Agent": "CTS-comic-to-story"})
+        if resp.status_code == 200:
+            tags = sorted({t for t in re.findall(r"/releases/tag/([^\"'<>\s?#]+)", resp.text) if BUILD_TAG.match(t)},
+                          key=tag_number, reverse=True)
+            if tags:
+                return [{"tag_name": t, "assets": [], "source": "feed"} for t in tags[:limit]]
+            problems.append("the releases feed listed no llama.cpp builds")
+        else:
+            problems.append(f"releases feed answered {resp.status_code}")
+    except httpx.HTTPError as exc:
+        problems.append(f"releases feed: {exc}")
+    raise RuntimeError(f"Could not find the latest llama.cpp build ({'; '.join(problems)}). {MANUAL_HELP}")
+
+
+def latest_release(client: httpx.Client) -> dict[str, Any]:
+    return release_candidates(client, limit=1)[0]
 
 
 # ----------------------------------------------------------------------------- install
@@ -401,36 +421,43 @@ def install_runtime(
     owns = client is None
     client = client or httpx.Client(timeout=httpx.Timeout(30, read=120), follow_redirects=True)
     try:
-        release = latest_release(client)
-        tag = release["tag_name"]
+        releases = release_candidates(client)
+        tag = releases[0]["tag_name"]
         installed_tag = managed.get("tag", "") if managed else ""
         if (existing and not repair and cts_owned and update and installed_tag
                 and tag_number(tag) <= tag_number(installed_tag) and verify(existing)[0]):
             return existing  # already on the newest release
-        assets = release["assets"]
-        ranked = rank_assets(assets, system, arch, wanted_flavor) if assets else []
-        if not ranked:  # API unavailable, or its list had nothing for this machine
-            assets = synthesize_assets(tag, system, arch)
-            ranked = rank_assets(assets, system, arch, wanted_flavor)
-        if not ranked:
-            raise RuntimeError(f"No prebuilt llama.cpp for {system}/{arch}. {MANUAL_HELP}")
 
         failures: list[str] = []
-        for asset in ranked:
-            try:
-                server, flavor_label = _install_asset(
-                    client, tag, asset, companion_assets(release["assets"], asset), on_progress, is_cancelled)
-            except (DownloadCancelled, KeyboardInterrupt):
-                raise
-            except Exception as exc:  # noqa: BLE001 - try the next build (e.g. Vulkan -> CPU)
-                failures.append(f"{asset['name']}: {exc}")
-                if on_progress:
-                    on_progress("That build did not work, trying another", 0, 0)
+        for release in releases:
+            tag = release["tag_name"]
+            assets = release["assets"]
+            ranked = rank_assets(assets, system, arch, wanted_flavor) if assets else []
+            if not ranked:  # no asset list (feed fallback) or nothing for this machine in it
+                ranked = rank_assets(synthesize_assets(tag, system, arch), system, arch, wanted_flavor)
+            if not ranked:
+                failures.append(f"{tag}: no prebuilt build for {system}/{arch}")
                 continue
-            _state_file().write_text(json.dumps({"tag": tag, "flavor": flavor_label, "path": str(server),
-                                                 "asset": asset["name"]}), encoding="utf-8")
-            _cleanup_old(_top_level(server).name)
-            return server
+            only_missing_files = True
+            for asset in ranked:
+                try:
+                    server, flavor_label = _install_asset(
+                        client, tag, asset, companion_assets(assets, asset), on_progress, is_cancelled)
+                except (DownloadCancelled, KeyboardInterrupt):
+                    raise
+                except Exception as exc:  # noqa: BLE001 - try the next build (e.g. Vulkan -> CPU)
+                    missing = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404
+                    only_missing_files = only_missing_files and missing
+                    failures.append(f"{asset['name']}: {'not published (404)' if missing else exc}")
+                    if on_progress:
+                        on_progress("That build did not work, trying another", 0, 0)
+                    continue
+                _state_file().write_text(json.dumps({"tag": tag, "flavor": flavor_label, "path": str(server),
+                                                     "asset": asset["name"]}), encoding="utf-8")
+                _cleanup_old(_top_level(server).name)
+                return server
+            if not only_missing_files:
+                break  # the build exists but does not run here; an older one will not help
         raise RuntimeError("llama.cpp could not be installed:\n  - " + "\n  - ".join(failures) + f"\n{MANUAL_HELP}")
     finally:
         if owns:

@@ -159,7 +159,7 @@ CTS downloads the official prebuilt llama.cpp for your system and manages it for
 - **Checks that it works.** The engine is run (`llama-server --version`) before CTS accepts it. If a GPU build does not start on your machine, CTS installs the CPU build instead.
 - **Installs missing system libraries.** On Linux it detects a missing `libgomp` / `libvulkan` and installs it with your package manager when it can (as root, or with passwordless `sudo`); otherwise it prints the exact command to run. On Windows it installs the Microsoft Visual C++ Redistributable with `winget` when the engine reports a missing DLL.
 - **Updates.** *Settings → Local models → Update* (or `cts setup-runtime --update`) moves to the newest llama.cpp release; new model families often need a newer engine.
-- **Works around GitHub limits.** If the GitHub API is rate-limited or blocked, CTS reads the latest release from the website instead. Set `GITHUB_TOKEN` to raise the API limit.
+- **Works around GitHub limits.** llama.cpp publishes its builds as pre-releases (tags `b12111`...), so CTS lists the releases and picks the newest build tag itself. If the GitHub API is rate-limited or blocked, it reads the public releases feed instead; if the newest build's files are not uploaded yet, it uses the previous build. Set `GITHUB_TOKEN` to raise the API limit.
 - **Installs safely.** The engine is unpacked into a temporary folder and only moved into place once it works, so a failed install never leaves a broken engine behind.
 - **Respects yours.** If `llama-server` is already on your `PATH` (for example from `brew` or `winget`) or set with `CTS_LLAMA_SERVER`, CTS uses it and never replaces it.
 

@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 To update an existing installation, run the install command again or run `cts update` (see the [README](README.md#updating)).
 
+## 0.2.1 - 2026-11-04
+
+### Fixed
+- **llama.cpp could not be installed** - `llama-v0.9.0-bin-ubuntu-vulkan-x64.tar.gz: 404 Not Found`. llama.cpp publishes every build as a GitHub *pre-release* (tags like `b12111`), and GitHub's "latest release" endpoint (API and website redirect alike) skips pre-releases and returns an unrelated release - `v0.9.0` - that has no binaries. CTS 0.2.0 trusted that answer and built download URLs from it. CTS now lists the releases and only accepts tags shaped like `b<number>`, newest first, and never calls the "latest" endpoint.
+- If the GitHub API is rate-limited or blocked, CTS reads the public releases feed (`releases.atom`) instead of the old redirect trick.
+- If the newest build is listed but its files are not uploaded yet (404), CTS falls back to the previous build instead of failing. A build that downloads but does not run on this computer does not trigger downloads of older builds.
+- Failed attempts are reported plainly in the error message (for example "not published (404)") together with what to do next.
+
+### Added
+- Regression tests that reproduce the report: an unrelated `v0.9.0` release is served as "latest" and must never be used, via both the API and the feed.
+
 ## 0.2.0 - 2026-11-04
 
 This release is about installing and updating **everything** CTS needs - above all the llama.cpp engine for local models - and making that process reliable.

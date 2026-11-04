@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import re
 import stat
 import sys
 import tarfile
@@ -100,25 +101,60 @@ def client_for(handler):
     return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
 
 
-def test_latest_release_from_api():
-    c = client_for(lambda r: httpx.Response(200, json={"tag_name": "b9000", "assets": ASSETS}))
-    rel = runtime.latest_release(c)
-    assert rel["tag_name"] == "b9000" and rel["source"] == "api" and len(rel["assets"]) == len(ASSETS)
+DECOY = {"tag_name": "v0.9.0", "draft": False, "prerelease": False, "assets": [{"name": "unrelated.zip"}]}
 
 
-def test_latest_release_falls_back_to_the_website_when_the_api_is_rate_limited():
+def api_list(*tags):
+    return [DECOY] + [{"tag_name": t, "draft": False, "prerelease": True, "assets": ASSETS} for t in tags]
+
+
+ATOM = """<feed><entry><link href="https://github.com/ggml-org/llama.cpp/releases/tag/v0.9.0"/></entry>
+<entry><link href="https://github.com/ggml-org/llama.cpp/releases/tag/b9100"/></entry>
+<entry><link href="https://github.com/ggml-org/llama.cpp/releases/tag/b9123"/></entry>
+<entry><link href="https://github.com/ggml-org/llama.cpp/releases/tag/b12111"/></entry></feed>"""
+
+
+def test_releases_are_listed_and_the_unrelated_release_is_ignored():
+    """llama.cpp publishes pre-releases only, so GitHub's 'latest' is an unrelated v0.9.0 with no binaries."""
+    c = client_for(lambda r: httpx.Response(200, json=api_list("b8999", "b9000", "b9001")))
+    found = runtime.release_candidates(c)
+    assert [r["tag_name"] for r in found] == ["b9001", "b9000", "b8999"] and found[0]["source"] == "api"
+    assert len(found[0]["assets"]) == len(ASSETS)
+
+
+def test_the_latest_release_endpoint_is_never_used():
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json=api_list("b9000"))
+
+    runtime.release_candidates(client_for(handler))
+    assert seen and not any(u.rstrip("/").endswith("releases/latest") for u in seen)
+    assert "releases/latest" not in runtime.RELEASES_API and "latest" not in runtime.RELEASES_ATOM
+
+
+def test_tags_that_are_not_builds_are_rejected_everywhere():
+    c = client_for(lambda r: httpx.Response(200, json=[DECOY, {"tag_name": "v1.0", "assets": []}]) if "api" in str(r.url)
+                   else httpx.Response(200, text='<a href="/ggml-org/llama.cpp/releases/tag/v0.9.0"/>'))
+    with pytest.raises(RuntimeError, match="no llama.cpp builds"):
+        runtime.release_candidates(c)
+
+
+def test_feed_is_used_when_the_api_is_rate_limited():
     def handler(request):
         if "api.github.com" in str(request.url):
             return httpx.Response(403, json={"message": "API rate limit exceeded"})
-        return httpx.Response(302, headers={"location": "https://github.com/ggml-org/llama.cpp/releases/tag/b9123"})
+        return httpx.Response(200, text=ATOM)
 
-    rel = runtime.latest_release(client_for(handler))
-    assert (rel["tag_name"], rel["source"], rel["assets"]) == ("b9123", "redirect", [])
+    found = runtime.release_candidates(client_for(handler))
+    assert [r["tag_name"] for r in found] == ["b12111", "b9123", "b9100"]  # numeric order, v0.9.0 dropped
+    assert all(r["source"] == "feed" and r["assets"] == [] for r in found)
 
 
-def test_latest_release_reports_when_everything_fails():
-    with pytest.raises(RuntimeError, match="Could not reach GitHub"):
-        runtime.latest_release(client_for(lambda r: httpx.Response(500)))
+def test_lookup_reports_when_everything_fails():
+    with pytest.raises(RuntimeError, match="Could not find the latest llama.cpp build"):
+        runtime.release_candidates(client_for(lambda r: httpx.Response(500)))
 
 
 def test_github_token_is_sent_when_available(monkeypatch):
@@ -127,9 +163,9 @@ def test_github_token_is_sent_when_available(monkeypatch):
 
     def handler(request):
         seen["auth"] = request.headers.get("authorization")
-        return httpx.Response(200, json={"tag_name": "b1", "assets": []})
+        return httpx.Response(200, json=api_list("b1"))
 
-    runtime.latest_release(client_for(handler))
+    runtime.release_candidates(client_for(handler))
     assert seen["auth"] == "Bearer tok"
 
 
@@ -146,16 +182,21 @@ def tar_gz(files: dict[str, tuple[str, int]]) -> bytes:
 
 
 class FakeGitHub:
-    """Serves a release whose Vulkan build is broken and whose CPU build works."""
+    """A llama.cpp repository: pre-release builds (b-tags), an unrelated 'latest' release, a releases feed.
 
-    def __init__(self, tag="b9000", vulkan_ok=False, cpu_ok=True, api_ok=True):
-        self.tag, self.api_ok, self.requests = tag, api_ok, []
-        good, bad = OK_SCRIPT.format(v=tag.lstrip("b")), BAD_SCRIPT
-        self.files = {
-            f"llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz": tar_gz({f"llama-{tag}/llama-server": (good if vulkan_ok else bad, 0o755),
-                                                                 f"llama-{tag}/libggml.so": ("lib", 0o644)}),
-            f"llama-{tag}-bin-ubuntu-x64.tar.gz": tar_gz({f"llama-{tag}/llama-server": (good if cpu_ok else bad, 0o755)}),
-        }
+    By default the Vulkan build is broken and the CPU build works. ``unpublished`` tags list their assets
+    but answer 404 for the files (a release whose uploads have not finished).
+    """
+
+    def __init__(self, tag="b9000", vulkan_ok=False, cpu_ok=True, api_ok=True, older=(), unpublished=()):
+        self.tag, self.api_ok, self.requests, self.unpublished = tag, api_ok, [], set(unpublished)
+        self.tags = [tag, *older]
+        self.files = {}
+        for t in self.tags:
+            good, bad = OK_SCRIPT.format(v=t.lstrip("b")), BAD_SCRIPT
+            self.files[f"llama-{t}-bin-ubuntu-vulkan-x64.tar.gz"] = tar_gz({
+                f"llama-{t}/llama-server": (good if vulkan_ok else bad, 0o755), f"llama-{t}/libggml.so": ("lib", 0o644)})
+            self.files[f"llama-{t}-bin-ubuntu-x64.tar.gz"] = tar_gz({f"llama-{t}/llama-server": (good if cpu_ok else bad, 0o755)})
 
     def client(self):
         return httpx.Client(transport=httpx.MockTransport(self.handle), follow_redirects=True)
@@ -166,11 +207,22 @@ class FakeGitHub:
         if "api.github.com" in url:
             if not self.api_ok:
                 return httpx.Response(403, json={"message": "rate limited"})
-            assets = [{"name": n, "size": len(b), "browser_download_url": f"https://dl.test/{n}"} for n, b in self.files.items()]
-            return httpx.Response(200, json={"tag_name": self.tag, "assets": assets})
-        if url.endswith("/releases/latest"):
-            return httpx.Response(302, headers={"location": f"https://github.com/ggml-org/llama.cpp/releases/tag/{self.tag}"})
+            releases = [DECOY]  # GitHub sorts by date; the unrelated v0.9.0 is in the list too
+            for t in self.tags:
+                assets = [{"name": n, "size": len(b), "browser_download_url": f"https://dl.test/{n}"}
+                          for n, b in self.files.items() if f"-{t}-" in n]
+                releases.append({"tag_name": t, "draft": False, "prerelease": True, "assets": assets})
+            return httpx.Response(200, json=releases)
+        if url.endswith("releases.atom"):
+            links = "".join(f'<entry><link href="https://github.com/ggml-org/llama.cpp/releases/tag/{t}"/></entry>'
+                            for t in ["v0.9.0", *self.tags])
+            return httpx.Response(200, text=f"<feed>{links}</feed>")
+        if url.rstrip("/").endswith("/releases/latest"):  # the trap: an unrelated release without binaries
+            return httpx.Response(302, headers={"location": "https://github.com/ggml-org/llama.cpp/releases/tag/v0.9.0"})
         name = url.rsplit("/", 1)[-1].split("?")[0]
+        tag_in_name = re.search(r"llama-(b\d+)-", name)
+        if tag_in_name and tag_in_name.group(1) in self.unpublished:
+            return httpx.Response(404)
         if name in self.files:
             return httpx.Response(200, content=self.files[name])
         return httpx.Response(404)
@@ -216,15 +268,42 @@ def test_all_builds_failing_gives_every_reason_and_changes_nothing(linux, cts_ho
         runtime.install_runtime(client=gh.client())
     text = str(exc.value)
     assert "ubuntu-vulkan-x64" in text and "ubuntu-x64" in text and "libvulkan.so.1" in text and "brew install llama.cpp" in text
+    assert "404" not in text
     assert runtime.managed_info() is None and runtime.find_server() is None
     assert not list((cts_home / "runtime").glob("*.tmp"))
 
 
-def test_api_blocked_still_installs_using_the_redirect_and_known_names(linux, cts_home):
+def test_api_blocked_still_installs_using_the_feed_and_known_names(linux, cts_home):
     gh = FakeGitHub(vulkan_ok=True, api_ok=False, tag="b9100")
     server = runtime.install_runtime(client=gh.client())
     assert runtime.managed_info()["tag"] == "b9100" and runtime.managed_info()["flavor"] == "vulkan" and server.is_file()
     assert any("releases/download/b9100/llama-b9100-bin-ubuntu-vulkan-x64.tar.gz" in u for u in gh.requests)
+
+
+def test_regression_v0_9_0_is_never_used_to_build_download_urls(linux, cts_home):
+    """The reported failure: 'llama-v0.9.0-bin-ubuntu-vulkan-x64.tar.gz: 404 Not Found'."""
+    for api_ok in (True, False):
+        gh = FakeGitHub(vulkan_ok=True, api_ok=api_ok, tag="b12111")
+        runtime.install_runtime(client=gh.client(), repair=True)
+        assert runtime.managed_info()["tag"] == "b12111"
+        assert not any("v0.9.0" in u and "download" in u for u in gh.requests)
+        assert not any(u.rstrip("/").endswith("/releases/latest") for u in gh.requests)
+
+
+def test_a_build_whose_files_are_not_uploaded_yet_falls_back_to_the_previous_one(linux, cts_home):
+    gh = FakeGitHub(tag="b9001", older=["b9000"], vulkan_ok=True, unpublished=["b9001"])
+    runtime.install_runtime(client=gh.client())
+    assert runtime.managed_info()["tag"] == "b9000"
+    gh2 = FakeGitHub(tag="b9001", older=["b9000"], vulkan_ok=True, unpublished=["b9001"], api_ok=False)
+    runtime.install_runtime(client=gh2.client(), repair=True)  # same through the feed + derived names
+    assert runtime.managed_info()["tag"] == "b9000"
+
+
+def test_a_build_that_exists_but_does_not_run_does_not_trigger_old_builds(linux, cts_home):
+    gh = FakeGitHub(tag="b9001", older=["b9000"], vulkan_ok=False, cpu_ok=False)
+    with pytest.raises(RuntimeError):
+        runtime.install_runtime(client=gh.client())
+    assert not any("/b9000/" in u for u in gh.requests)  # no pointless downloads of older builds
 
 
 def test_corrupt_download_is_discarded_and_next_build_is_tried(linux, cts_home):
