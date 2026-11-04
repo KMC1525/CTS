@@ -121,9 +121,9 @@ def test_multi_volume_zip_is_split(client):
 # ---------------------------------------------------------------------------- jobs
 def test_job_without_configuration_gives_an_actionable_error(client):
     [vol] = upload(client)
-    r = client.post("/api/jobs", json={"volumes": [vol["id"]]})
+    r = client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]]})
     assert r.status_code == 400 and "API key" in r.json()["detail"]
-    assert client.post("/api/jobs", json={"volumes": []}).status_code in (400, 422)
+    assert client.post("/api/jobs", json={"final_review": False, "volumes": []}).status_code in (400, 422)
 
 
 def test_batch_generation_end_to_end_with_sse_and_downloads(client, mock_llm):
@@ -131,7 +131,7 @@ def test_batch_generation_end_to_end_with_sse_and_downloads(client, mock_llm):
     configure(client, mock)
     v2 = upload(client, "Vol 2.zip", zip_bytes("Vol 2", 2))[0]
     v1 = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 3))[0]
-    job = client.post("/api/jobs", json={"volumes": [v1["id"], v2["id"]], "rating": "sfw", "words_per_page": 120, "skip_covers": False}).json()
+    job = client.post("/api/jobs", json={"volumes": [v1["id"], v2["id"]], "rating": "sfw", "words_per_page": 120, "skip_covers": False, "final_review": False}).json()
     jid = job["id"]
 
     events, snapshot = [], None
@@ -176,7 +176,7 @@ def test_carry_story_bible_between_volumes(client, mock_llm):
     configure(client, mock)
     v1 = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 1))[0]
     v2 = upload(client, "Vol 2.zip", zip_bytes("Vol 2", 1))[0]
-    jid = client.post("/api/jobs", json={"volumes": [v1["id"], v2["id"]], "carry_bible": True, "words_per_page": 120}).json()["id"]
+    jid = client.post("/api/jobs", json={"final_review": False, "volumes": [v1["id"], v2["id"]], "carry_bible": True, "words_per_page": 120}).json()["id"]
     wait_for(client, jid)
     novelists = [q for q in mock.requests if mock.role_of(q["messages"]) == "novelist"]
     second_volume_prompt = json.dumps(novelists[1]["messages"])
@@ -190,7 +190,7 @@ def test_stop_then_resume_continues_where_it_left_off(client, mock_llm):
     mock.delay = 0.25
     configure(client, mock)
     [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 4))
-    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120}).json()["id"]
+    jid = client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]], "words_per_page": 120}).json()["id"]
     end = time.time() + 30
     while time.time() < end and client.get(f"/api/jobs/{jid}").json()["pages_done"] < 1:
         time.sleep(0.1)
@@ -214,7 +214,7 @@ def test_jobs_survive_a_restart_as_interrupted(client, mock_llm, cts_home):
     mock.delay = 0.4
     configure(client, mock)
     [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 3))
-    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120}).json()["id"]
+    jid = client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]], "words_per_page": 120}).json()["id"]
     end = time.time() + 30
     while time.time() < end and client.get(f"/api/jobs/{jid}").json()["pages_done"] < 1:
         time.sleep(0.1)
@@ -301,7 +301,7 @@ def test_nsfw_job_halts_when_the_comic_shows_a_minor_and_cannot_be_resumed(clien
     mock = mock_llm(lambda role, msgs: {"analyst": minor_dossier(), "keeper": BIBLE, "cover": NOT_COVER}.get(role, PROSE))
     configure(client, mock)
     [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 3))
-    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "rating": "nsfw", "skip_covers": False}).json()["id"]
+    jid = client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]], "rating": "nsfw", "skip_covers": False}).json()["id"]
     snap = wait_for(client, jid, ("halted", "done", "failed"))
     assert snap["status"] == "halted" and "under 18" in snap["error"] and "page 1" in snap["error"]
     assert "SFW edition" in snap["error"] and snap["pages_done"] == 0
@@ -311,7 +311,7 @@ def test_nsfw_job_halts_when_the_comic_shows_a_minor_and_cannot_be_resumed(clien
     with client.stream("GET", f"/api/jobs/{jid}/events") as stream:  # the event stream ends instead of hanging
         assert any(line.startswith("event: end") for line in stream.iter_lines())
     # the same comic in the SFW edition is simply written
-    sfw = client.post("/api/jobs", json={"volumes": [vol["id"]], "rating": "sfw", "skip_covers": False, "words_per_page": 120}).json()["id"]
+    sfw = client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]], "rating": "sfw", "skip_covers": False, "words_per_page": 120}).json()["id"]
     assert wait_for(client, sfw)["status"] == "done"
     assert client.delete(f"/api/jobs/{jid}").json() == {"ok": True}
 
@@ -322,7 +322,7 @@ def test_a_halted_job_survives_a_restart_as_halted(client, mock_llm):
     mock = mock_llm(lambda role, msgs: {"analyst": minor_dossier(), "keeper": BIBLE}.get(role, PROSE))
     configure(client, mock)
     [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 1))
-    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "rating": "nsfw", "skip_covers": False}).json()["id"]
+    jid = client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]], "rating": "nsfw", "skip_covers": False}).json()["id"]
     wait_for(client, jid, ("halted",))
     reborn = jobs.JobManager()
     assert reborn.jobs[jid].status == "halted" and "under 18" in reborn.jobs[jid].error
@@ -339,7 +339,7 @@ def test_covers_are_skipped_counted_as_finished_and_left_out_of_the_novel(client
     mock = mock_llm(handler)
     configure(client, mock)
     [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 3))
-    job = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120}).json()
+    job = client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]], "words_per_page": 120}).json()
     assert client.get(f"/api/jobs/{job['id']}").json()["options"]["skip_covers"] is True  # on by default
     snap = wait_for(client, job["id"])
     assert snap["status"] == "done" and snap["pages_done"] == 3 and snap["pages_total"] == 3
@@ -358,7 +358,7 @@ def test_skip_covers_can_be_turned_off(client, mock_llm):
     mock = mock_llm()
     configure(client, mock)
     [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 2))
-    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120, "skip_covers": False}).json()["id"]
+    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120, "skip_covers": False, "final_review": False}).json()["id"]
     wait_for(client, jid)
     assert not any(mock.role_of(q["messages"]) == "cover" for q in mock.requests)
 
@@ -368,7 +368,7 @@ def test_a_context_window_below_the_minimum_is_refused_with_advice(client, mock_
     configure(client, mock)
     client.put("/api/settings", json={"context_window": 4096})
     [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 1))
-    r = client.post("/api/jobs", json={"volumes": [vol["id"]]})
+    r = client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]]})
     assert r.status_code == 400 and "too small" in r.json()["detail"] and "8,192" in r.json()["detail"]
     assert 4096 not in client.get("/api/options").json()["context_presets"]
 
@@ -378,12 +378,12 @@ def test_local_job_is_refused_up_front_when_the_engine_or_model_is_not_ready(cli
 
     [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 1))
     client.put("/api/settings", json={"provider_type": "local", "context_window": 16384})
-    assert "Install and select a local model" in client.post("/api/jobs", json={"volumes": [vol["id"]]}).json()["detail"]
+    assert "Install and select a local model" in client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]]}).json()["detail"]
     entry = install_fake_model(cts_home)
     client.put("/api/settings", json={"local": {"active_model": entry["id"]}})
-    assert "llama.cpp is not installed" in client.post("/api/jobs", json={"volumes": [vol["id"]]}).json()["detail"]
+    assert "llama.cpp is not installed" in client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]]}).json()["detail"]
     (cts_home / "models" / "o__m" / "m-Q4_K_M.gguf").unlink()
-    assert "files are missing" in client.post("/api/jobs", json={"volumes": [vol["id"]]}).json()["detail"]
+    assert "files are missing" in client.post("/api/jobs", json={"final_review": False, "volumes": [vol["id"]]}).json()["detail"]
 
 
 def test_stop_kills_the_local_engine_so_a_long_generation_ends_at_once(cts_home, monkeypatch):
@@ -421,3 +421,102 @@ def test_the_context_the_server_really_has_is_what_cts_plans_with(cts_home, monk
     monkeypatch.setattr(jobs, "llama", type("L", (), {"slot_context": 4096})())
     with pytest.raises(jobs.LocalServerError, match="needs at least 8,192"):
         jobs.JobManager._fit_context(job, llm.LLMSpec("local", "local", "local", "k", "http://127.0.0.1:1/v1", 32768, 1024))
+
+
+# ========================================== v0.4: final review + system prompt ==========================================
+def review_api_handler(reviewer, writer=None):
+    from test_pipeline import page_text, revised_text
+
+    def handler(role, msgs):
+        task = " ".join(m["content"] if isinstance(m["content"], str) else " ".join(p.get("text", "") for p in m["content"])
+                        for m in msgs[-1:])
+        if role == "revisor":
+            return reviewer(msgs)
+        if role == "analyst":
+            return ANALYSIS
+        if role == "keeper":
+            return BIBLE
+        if role == "cover":
+            return NOT_COVER
+        found = re.search(r"novel page (\d+)", task)
+        n = int(found.group(1)) if found else 1
+        return revised_text(n) if "REVISION NOTES" in task else page_text(n)
+
+    return handler
+
+
+def test_system_prompt_and_review_options_flow_through_the_api_and_are_remembered(client, mock_llm):
+    from test_pipeline import Reviewer
+
+    mock = mock_llm(review_api_handler(Reviewer()))
+    configure(client, mock)
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 2))
+    direction = "Write like a hard-boiled noir. First person, present tense."
+    job = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120, "skip_covers": False,
+                                         "custom_prompt": f"  {direction}  "}).json()
+    snap = wait_for(client, job["id"])
+    assert snap["status"] == "done"
+    assert snap["options"]["custom_prompt"] == direction and snap["options"]["final_review"] is True  # review is on by default
+    review = snap["volumes"][0]["review"]
+    assert review["status"] == "passed" and review["rounds"][0]["verdict"] == "coherent"
+    novelist = next(q for q in mock.requests if mock.role_of(q["messages"]) == "novelist")
+    assert direction in novelist["messages"][0]["content"]
+    # the review is persisted with the job and survives a restart
+    from cts import jobs
+
+    reborn = jobs.JobManager().jobs[job["id"]]
+    assert reborn.vstate[0]["review"]["status"] == "passed" and reborn.options.custom_prompt == direction
+
+
+def test_the_system_prompt_is_a_remembered_default(client):
+    r = client.put("/api/settings", json={"defaults": {"custom_prompt": "Make it a ghost story.", "final_review": False}})
+    assert r.json()["defaults"]["custom_prompt"] == "Make it a ghost story." and r.json()["defaults"]["final_review"] is False
+    assert client.get("/api/settings").json()["defaults"]["custom_prompt"] == "Make it a ghost story."
+    client.put("/api/settings", json={"defaults": {"custom_prompt": ""}})
+    assert client.get("/api/settings").json()["defaults"]["custom_prompt"] == ""
+
+
+def test_an_absurdly_long_system_prompt_is_rejected_and_a_long_one_is_capped(client, mock_llm):
+    from test_pipeline import Reviewer
+
+    mock = mock_llm(review_api_handler(Reviewer()))
+    configure(client, mock)
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 1))
+    assert client.post("/api/jobs", json={"volumes": [vol["id"]], "custom_prompt": "x" * 20001}).status_code == 422
+    job = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120, "custom_prompt": "y" * 9000}).json()
+    assert len(client.get(f"/api/jobs/{job['id']}").json()["options"]["custom_prompt"]) == 6000
+    wait_for(client, job["id"])
+
+
+def test_pages_rewritten_by_the_review_are_visible_in_the_job_and_streamed(client, mock_llm):
+    from test_pipeline import FIX_PAGE_2, Reviewer, text_coherent
+
+    reviewer = Reviewer(window_issues=[{2: "her coat is blue but the bible says red"}, {}], verdicts=[FIX_PAGE_2, text_coherent()])
+    mock = mock_llm(review_api_handler(reviewer))
+    configure(client, mock)
+    [vol] = upload(client, "Vol 1.zip", zip_bytes("Vol 1", 3))
+    jid = client.post("/api/jobs", json={"volumes": [vol["id"]], "words_per_page": 120, "skip_covers": False}).json()["id"]
+    events = []
+    with client.stream("GET", f"/api/jobs/{jid}/events") as stream:
+        kind = None
+        for line in stream.iter_lines():
+            if line.startswith("event:"):
+                kind = line.split(":", 1)[1].strip()
+            elif line.startswith("data:") and kind not in ("snapshot", "end"):
+                events.append(json.loads(line[5:]))
+            elif line == "":
+                if kind == "end":
+                    break
+                kind = None  # an SSE event without an "event:" line is a plain message
+    types = [e["type"] for e in events]
+    assert "review_start" in types and "review_result" in types and types.index("review_start") < types.index("volume_files")
+    assert [e["step"] for e in events if e["type"] == "review_step"][:2] == ["windows", "global"]
+    assert any(e["type"] == "review_step" and e["step"] == "fix" and e["page"] == 2 for e in events)
+    snap = wait_for(client, jid)
+    pages = {p["index"]: p for p in snap["volumes"][0]["pages"]}
+    assert pages[2]["revisions"] == 1 and not pages[1].get("revisions") and pages[2]["status"] == "done"
+    assert snap["volumes"][0]["review"]["status"] == "passed" and [r["action"] for r in snap["volumes"][0]["review"]["rounds"]] == ["fix-pages", "pass"]
+    assert snap["pages_done"] == 3 and snap["volumes"][0]["done"] == 3  # a rewrite does not change the progress count
+    txt = client.get(f"/api/jobs/{jid}/volumes/0/download", params={"format": "txt"}).text
+    assert "Her red coat stayed red" in txt
+    assert client.get(f"/api/jobs/{jid}").json()["activity"]  # the activity line mentioned the review while it ran

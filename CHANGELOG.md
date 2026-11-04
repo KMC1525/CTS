@@ -5,6 +5,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 To update an existing installation, run the install command again or run `cts update` (see the [README](README.md#updating)).
 
+## 0.4.0 - 2026-11-04
+
+### Added
+- **`final-revisor` system prompt and Final Revisor agent** (`cts/prompts/final-revisor.md`). Before a volume is delivered, the finished novel is read as a book. The revisor reads it in windows of consecutive pages sized to the model's context window (with the story bible), writes a one-line summary and any concrete problem for every page, and then gives a verdict on the whole novel:
+  - **`coherent`** - the novel passes and is delivered as it is.
+  - **`fix-pages`** - only the named pages are written again, with the revisor's notes and the faulty version in front of the writer. The saved page analysis is reused, so the comic image is **not** read again, and every other page is kept untouched. Only the rewritten pages and their neighbours are reviewed again.
+  - **`redo-all`** - the whole volume is produced again (images included), guided by the revisor's notes, when the book is incoherent as a whole.
+- **Automatic (no-LLM) checks** for pages that can never be coherent - empty pages, placeholders for failed pages, refusals, leaked instructions or markers, and a page that repeats the previous one. These pages are always written again, even when the revisor says the rest is fine (this also gives pages that failed during generation a second chance).
+- **Bounded:** at most two rewrites per volume (`review_rounds`); if problems remain the novel is delivered with the open issues reported, and if the review cannot run the novel is delivered without it. A volume that was already reviewed is not reviewed again on resume unless its text changed (`review.json` is saved with the job).
+- **"Final review before delivery" option** (on by default; `final_review` in the API) and a **Review** button in the story box with a report of every round (verdict, reason, pages rewritten, problems found). Rewritten pages are marked *revised*, and a page being rewritten keeps its old text on screen meanwhile.
+- **Optional "System prompt" section** under the novel options (`custom_prompt` in the API, up to 6,000 characters, remembered between sessions). It steers the narrative's voice, tone, style, point of view and tense in **both the SFW and the NSFW edition**. It is given to the novelist, the editor and the story keeper (after their built-in prompt and *before* the rating policy, so the rating rules and the age rule stay the last thing the model reads) and to the final revisor (so the requested style is not flagged as a defect). It cannot change what happens on a comic page, the page-for-page contract, the rating policy or the age rule - the age rule is enforced by code on the page analysis, so no system prompt can switch it off.
+- Tests for all of the above, including mutation-checked tests for each decision path of the review (pass, rewrite pages, redo all, rewrite limit, mechanical findings, review failure, unreadable answers, resume), the order of the prompt sections and the effect of the system prompt on both editions.
+
+### Changed
+- `VolumeRunner.run_volume` now writes the pages and then runs the review before exporting, so the downloadable files always contain the reviewed novel. The page-writing step was split out so that a single page can be rewritten from its saved analysis.
+- The story keeper's prompt is also steered by the system prompt, so the voice recorded in the story bible matches the direction.
+- Job and story-box state now carry the review report per volume; a stopped job no longer leaves a review marked as running.
+
 ## 0.3.0 - 2026-11-04
 
 ### Added

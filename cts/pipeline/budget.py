@@ -55,3 +55,51 @@ def trim_bible(bible: str, word_cap: int) -> str:
     if len(bible.split()) <= word_cap * 1.5:
         return bible
     return bible[: int(word_cap * 1.5 * 6)].rstrip() + "\n..."
+
+
+# ----------------------------------------------------------------- final review
+def review_window_tokens(context_window: int) -> int:
+    """How much novel text one review window may hold (the rest of the context is prompt, bible and answer)."""
+    return clamp(int(context_window * 0.40), 1500, 24_000)
+
+
+def review_output_cap(pages_in_window: int) -> int:
+    """One short line per page (summary + problem)."""
+    return clamp(95 * pages_in_window + 200, 400, 4000)
+
+
+def split_windows(pages: list[tuple[int, str]], token_budget: int) -> list[list[tuple[int, str]]]:
+    """Group consecutive pages into windows of at most ``token_budget`` tokens (a window has >= 1 page).
+
+    A gap in the page numbers (pages that need no review) always starts a new window.
+    """
+    windows: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    used = 0
+    for number, text in pages:
+        cost = estimate_tokens(text)
+        gap = bool(current) and number != current[-1][0] + 1
+        if current and (gap or used + cost > token_budget):
+            windows.append(current)
+            current, used = [], 0
+        current.append((number, text))
+        used += cost
+    if current:
+        windows.append(current)
+    return windows
+
+
+def fit_summaries(lines: list[tuple[int, str]], flagged: set[int], token_budget: int) -> list[tuple[int, str]]:
+    """Shrink the per-page summaries until they fit; flagged pages keep their full line."""
+    def cost(items: list[tuple[int, str]]) -> int:
+        return sum(estimate_tokens(f"{n}: {t}") for n, t in items)
+
+    if cost(lines) <= token_budget:
+        return lines
+    shortened = [(n, t if n in flagged else " ".join(t.split()[:10])) for n, t in lines]
+    if cost(shortened) <= token_budget:
+        return shortened
+    keep = [(n, t) for n, t in shortened if n in flagged]
+    rest = [(n, t) for n, t in shortened if n not in flagged]
+    step = max(2, -(-len(rest) // max(1, (token_budget - cost(keep)) // 18)))  # evenly sampled pages
+    return sorted(keep + rest[::step])

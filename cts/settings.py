@@ -37,6 +37,8 @@ class GenerationDefaults(BaseModel):
     language: str = "auto"
     carry_story_bible: bool = True
     skip_covers: bool = True
+    final_review: bool = True
+    custom_prompt: str = ""
 
 
 class Settings(BaseModel):

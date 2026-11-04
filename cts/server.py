@@ -47,6 +47,8 @@ class JobIn(BaseModel):
     language: str = "auto"
     carry_bible: bool = True
     skip_covers: bool = True
+    final_review: bool = True
+    custom_prompt: str = Field(default="", max_length=20000)
 
 
 class InstallIn(BaseModel):
@@ -281,7 +283,8 @@ def create_app() -> FastAPI:
         try:
             job = get_manager().create(
                 body.volumes,
-                RunOptions(body.rating, body.words_per_page, body.language, body.carry_bible, body.skip_covers),
+                RunOptions(body.rating, body.words_per_page, body.language, body.carry_bible, body.skip_covers,
+                           body.final_review, body.custom_prompt),
             )
         except (llm_mod.ConfigError, ValueError) as exc:
             raise HTTPException(400, str(exc))

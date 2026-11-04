@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import threading
 import time
@@ -64,6 +65,21 @@ EVIDENCE: Large title logo, publisher imprint and a composed key illustration wi
 PROSE = "Rain hammered the rooftop. Mira did not turn around. \"I told you not to follow me,\" she said.\n\nThe city glowed below her, indifferent."
 
 
+COHERENT = """VERDICT: coherent
+PAGES: none
+NOTES: none
+REASON: The pages follow each other and agree with the bible.
+"""
+
+
+def default_review(messages: list[dict[str, Any]]) -> str:
+    """What a happy Final Revisor answers: every page OK for task A, 'coherent' for task B."""
+    task = _text(messages[-1].get("content"))
+    if "TASK A" in task:
+        return "\n".join(f"PAGE {n} | OK | summary: Page {n} of the story." for n in re.findall(r"--- PAGE (\d+) ---", task))
+    return COHERENT
+
+
 class MockLLM:
     """Records every request; answers by agent role found in the system prompt."""
 
@@ -81,7 +97,7 @@ class MockLLM:
     def role_of(messages: list[dict[str, Any]]) -> str:
         system = " ".join(_text(m.get("content")) for m in messages if m.get("role") == "system")
         first = system.lower()
-        for key, role in (("book cover identifier", "cover"), ("comic page analyst", "analyst"), ("story keeper", "keeper"),
+        for key, role in (("final revisor", "revisor"), ("book cover identifier", "cover"), ("comic page analyst", "analyst"), ("story keeper", "keeper"),
                           ("fiction editor", "editor"), ("literary novelist", "novelist")):
             if key in first:
                 return role
@@ -98,8 +114,12 @@ class MockLLM:
             role = self.role_of(messages)
             if self.handler:
                 content = self.handler(role, messages)
+                if role == "revisor" and not isinstance(content, str):
+                    content = default_review(messages)
             else:
                 content = {"analyst": ANALYSIS, "keeper": BIBLE, "cover": NOT_COVER}.get(role, PROSE)
+                if role == "revisor":
+                    content = default_review(messages)
             return {
                 "id": "mock", "object": "chat.completion", "created": 0, "model": body.get("model", "mock"),
                 "choices": [{"index": 0, "finish_reason": "stop",

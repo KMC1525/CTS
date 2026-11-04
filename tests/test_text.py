@@ -112,3 +112,65 @@ def test_trim_bible_keeps_structure():
     bible = "# Story Bible\n" + "\n".join(f"- line {i} " + "word " * 10 for i in range(500))
     cut = trim_bible(bible, 200)
     assert cut.startswith("# Story Bible\n- line 0") and len(cut) < len(bible)
+
+
+# ============================================ v0.4: final review + author's direction ============================================
+def test_review_window_lines_are_parsed_tolerantly():
+    got = text.parse_review_window(
+        "PAGE 1 | OK | summary: Mira waits on the roof.\n"
+        "PAGE 2 | ISSUE | summary: Kenji arrives. | problem: her coat is blue but the bible says red\n"
+        "- **PAGE 3** | OK\n"
+        "Page 4: ISSUE - summary: x | problem: he is in Rome\n"
+        "random chatter")
+    assert got[1].ok and got[1].summary == "Mira waits on the roof."
+    assert not got[2].ok and got[2].problem == "her coat is blue but the bible says red" and got[2].summary == "Kenji arrives."
+    assert got[3].ok and got[3].summary == ""
+    assert not got[4].ok and "Rome" in got[4].problem
+    assert text.parse_review_window("nothing useful") == {}
+
+
+@pytest.mark.parametrize("value,total,expected", [
+    ("4, 17-19 and 22", 30, [4, 17, 18, 19, 22]), ("none", 9, []), ("3-99", 5, [3, 4, 5]),
+    ("2; 2; 7", 9, [2, 7]), ("0, 12", 10, []), ("19-17", 30, [17, 18, 19]), ("", 5, []),
+])
+def test_page_lists(value, total, expected):
+    assert text.parse_page_list(value, total) == expected
+
+
+def test_verdict_formats():
+    v = text.parse_verdict("VERDICT: **fix-pages**\nPAGES: 4, 7-8\nNOTES: Keep her coat red\nand the narrator in first person.\nREASON: pages 4 and 7 conflict.", 20)
+    assert (v.verdict, v.pages, v.all_pages) == ("fix-pages", [4, 7, 8], False)
+    assert v.notes == "Keep her coat red and the narrator in first person." and v.reason == "pages 4 and 7 conflict."
+    w = text.parse_verdict("VERDICT: redo all\nPAGES: all\nNOTES: n\nREASON: r", 9)
+    assert (w.verdict, w.all_pages, w.pages) == ("redo-all", True, [])
+    assert text.parse_verdict("VERDICT: coherent\nPAGES: none", 9).verdict == "coherent"
+    quiet = text.parse_verdict("VERDICT: coherent\nPAGES: none\nNOTES: none\nREASON: Fine.", 9)
+    assert quiet.notes == "" and quiet.reason == "Fine."  # 'none' is not a direction
+    assert text.parse_verdict("I think it is fine.", 9).verdict == "unknown"
+
+
+def test_mechanical_checks_need_no_llm():
+    same = "Rain fell on the roof of the old city tonight and Mira waited there alone for him."
+    found = text.mechanical_issues([
+        (1, same), (2, same), (3, "[Page 3 could not be generated: boom]"), (4, ""), (5, "I'm sorry, but I can't help with that."),
+        (6, "[[CTS-STOP-MINOR]] no"), (7, "Here is the page:\nIt rained."),
+        (8, "A completely different page about Kenji walking through the market at dawn with bread."),
+    ])
+    assert found == {2: "the page repeats page 1 almost word for word", 3: "the page was never written (placeholder)",
+                     4: "the page is empty", 5: "the page is a refusal, not prose",
+                     6: "the page contains an instruction or an assistant remark instead of only prose",
+                     7: "the page contains an instruction or an assistant remark instead of only prose"}
+    assert text.mechanical_issues([(1, "Short."), (2, "Short.")]) == {}  # too short to call a repeat
+
+
+def test_the_authors_direction_is_cleaned_and_capped():
+    assert text.clean_direction(None) == "" and text.clean_direction("   \n ") == ""
+    assert text.clean_direction("  noir \x00voice\r\nfirst person  ") == "noir voice\nfirst person"
+    assert len(text.clean_direction("x" * 9000)) == text.MAX_DIRECTION_CHARS
+
+
+def test_the_direction_block_says_what_it_cannot_override():
+    block = text.direction_block("Write like a noir novel.")
+    assert "Write like a noir novel." in block and "rating policy" in block and "age rule" in block
+    assert "events or" in block and "dialogue" in block
+    assert text.direction_block("") == ""

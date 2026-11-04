@@ -21,7 +21,9 @@ from .local import runtime as local_runtime
 from .local.server import LocalServerError, llama
 from .paths import jobs_dir
 from .pipeline import budget
-from .pipeline.runner import AgeHalt, Cancelled, FatalError, RunOptions, VolumeRunner, _public_record, load_record
+from .pipeline.runner import (
+    AgeHalt, Cancelled, FatalError, RunOptions, VolumeRunner, _public_record, load_record, load_review,
+)
 
 log = logging.getLogger("cts.jobs")
 TERMINAL = {"done", "failed", "cancelled", "interrupted", "halted"}
@@ -48,7 +50,7 @@ class Job:
         self.log: list[dict[str, Any]] = []
         self.vstate: list[dict[str, Any]] = [
             {"index": i, "name": v["name"], "total": v["pages"], "status": "queued", "files": {}, "partial": False,
-             "bible": "", "pages": {}}
+             "bible": "", "pages": {}, "review": {"status": "", "rounds": []}}
             for i, v in enumerate(volumes)
         ]
 
@@ -79,9 +81,12 @@ class Job:
                 self.finished = time.time()
                 for v in self.vstate:  # nothing is running any more: do not leave pages/volumes "in progress"
                     for page in v["pages"].values():
+                        page["revising"] = False
                         if page["status"] == "running":
                             page["status"] = "stopped"
                             page["steps"] = {k: x for k, x in page["steps"].items() if x == "done"}
+                    if v["review"]["status"] == "running":
+                        v["review"]["status"] = "interrupted"
                     if v["status"] == "running":
                         v["status"] = "partial"
         self.emit({"type": "job_status", "status": status, "error": error})
@@ -102,15 +107,21 @@ class Job:
             v["status"], v["total"] = "running", e["total"]
         elif kind == "page_start":
             p = self._page(vol, e["page"])
-            p["status"], p["steps"] = "running", {}
+            if e.get("revision"):  # rewritten after the final review: the old text stays visible meanwhile
+                p["revising"], p["steps"] = True, {}
+            else:
+                p["status"], p["steps"] = "running", {}
         elif kind == "step":
             p = self._page(vol, e["page"])
-            p["status"] = "running"
+            if not p.get("revising"):
+                p["status"] = "running"
             p["steps"][e["step"]] = e["status"]
-            self.activity = f"Volume {vol + 1} - page {e['page']}: {_STEP_LABEL[e['step']]}"
+            self.activity = f"Volume {vol + 1} - page {e['page']}: {_STEP_LABEL[e['step']]}" + (
+                " (rewrite after the final review)" if p.get("revising") else "")
         elif kind == "page_done":
             rec = e["record"]
             p = self._page(vol, e["page"])
+            p["revising"] = False
             p.update(rec)
             if rec.get("status") == "skipped":
                 p["steps"] = {k: v for k, v in p["steps"].items() if k == "cover"}
@@ -134,6 +145,19 @@ class Job:
             del self.log[:-300]
         elif kind == "activity":
             self.activity = e["message"]
+        elif kind == "review_start":
+            self.vstate[vol]["review"] = {"status": "running", "rounds": []}
+            self.activity = f"Volume {vol + 1}: final review - the whole novel is being read"
+        elif kind == "review_step":
+            step, n = e.get("step"), e.get("current")
+            self.activity = f"Volume {vol + 1}: final review - " + {
+                "windows": f"reading the novel (part {n}/{e.get('total')})",
+                "global": "judging the whole novel",
+                "fix": f"rewriting page {e.get('page')} ({n}/{e.get('total')})",
+                "redo-all": "writing the whole volume again",
+            }.get(step, "reviewing")
+        elif kind == "review_result":
+            self.vstate[vol]["review"] = {"status": e["status"], "rounds": e["rounds"]}
         elif kind == "age_halt":
             self.log.append({"ts": e["ts"], "level": "error",
                              "message": f"Page {e['page']}: stopped by the age rule - {e['evidence']}"})
@@ -155,7 +179,7 @@ class Job:
             vols = []
             for v in self.vstate:
                 pages = [v["pages"][k] for k in sorted(v["pages"])]
-                vols.append({**{k: v[k] for k in ("index", "name", "total", "status", "files", "partial", "bible")},
+                vols.append({**{k: v[k] for k in ("index", "name", "total", "status", "files", "partial", "bible", "review")},
                              "pages": pages, "done": sum(1 for p in pages if p["status"] in ("done", "skipped"))})
             return {**self.summary(), "options": asdict(self.options), "tokens": self.tokens,
                     "activity": self.activity, "log": list(self.log), "volumes": vols, "seq": len(self.events)}
@@ -201,6 +225,9 @@ class Job:
                 p["status"] = status if status in ("done", "skipped") else "failed"
                 v["bible"] = rec.get("bible_after", v["bible"])
                 done += p["status"] in ("done", "skipped")
+            saved = load_review(work)
+            if saved:
+                v["review"] = {"status": saved.get("status", ""), "rounds": saved.get("rounds", [])}
             out = work / "output"
             if out.is_dir():
                 files = {}

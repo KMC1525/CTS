@@ -394,3 +394,31 @@ def test_downloaded_files_must_be_real_gguf(tmp_path):
     good.write_bytes(b"GGUF\x03\x00")
     bad.write_text("<html>error</html>")
     assert models.is_gguf(good) and not models.is_gguf(bad) and not models.is_gguf(tmp_path / "missing")
+
+
+# ================================ v0.4: review windows and summaries must fit the context ================================
+def test_review_windows_group_consecutive_pages_within_the_budget():
+    from cts.pipeline import budget
+
+    page = "word " * 300  # ~455 tokens by the CTS estimate
+    pages = [(n, page) for n in range(1, 8)]
+    windows = budget.split_windows(pages, 1200)
+    assert [[n for n, _ in w] for w in windows] == [[1, 2], [3, 4], [5, 6], [7]]
+    assert budget.split_windows([(1, page * 20)], 500) == [[(1, page * 20)]]  # a huge page still gets its own window
+    assert budget.split_windows([], 500) == []
+    gap = budget.split_windows([(1, "a"), (2, "b"), (5, "c"), (6, "d")], 10_000)
+    assert [[n for n, _ in w] for w in gap] == [[1, 2], [5, 6]]  # unchanged pages in between are not reviewed
+    assert budget.review_window_tokens(8192) < budget.review_window_tokens(131072) <= 24_000
+    assert budget.review_output_cap(1) >= 400 and budget.review_output_cap(500) == 4000
+
+
+def test_page_summaries_are_shrunk_to_fit_but_flagged_pages_keep_their_detail():
+    from cts.pipeline import budget
+
+    lines = [(n, " ".join(f"w{n}_{i}" for i in range(30))) for n in range(1, 201)]
+    flagged = {7, 150}
+    fitted = budget.fit_summaries(lines, flagged, 1500)
+    assert sum(budget.estimate_tokens(f"{n}: {t}") for n, t in fitted) <= 1500 * 1.15
+    kept = dict(fitted)
+    assert len(kept[7].split()) == 30 and len(kept[150].split()) == 30  # flagged pages keep their full line
+    assert budget.fit_summaries(lines[:3], set(), 10_000) == lines[:3]  # nothing to shrink

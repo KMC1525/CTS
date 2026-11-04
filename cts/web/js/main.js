@@ -3,7 +3,7 @@ import { api } from './api.js';
 import { initSettings, openSettings, currentSettings } from './settings.js';
 import { initStory, openJob, refreshHistory } from './story.js';
 import { groupsFromDrop, groupsFromFiles, uploadGroup } from './upload.js';
-import { $, h, icon, naturalCompare, toast } from './util.js';
+import { $, debounce, h, icon, naturalCompare, toast } from './util.js';
 
 const state = {
   volumes: [],       // [{ id, name, pages, status: 'ready'|'uploading'|'error', progress, text }]
@@ -169,6 +169,8 @@ async function startJob() {
       language: $('#language').value,
       carry_bible: $('#carry').checked,
       skip_covers: $('#skip-covers').checked,
+      final_review: $('#final-review').checked,
+      custom_prompt: $('#custom-prompt').value.trim(),
     });
     await openJob(job.id);
     refreshHistory();
@@ -176,6 +178,23 @@ async function startJob() {
     toast(e.message, 'err', 8000);
     if (/api key|model|settings|install|base url/i.test(e.message)) openSettings();
   }
+}
+
+// -------------------------------------------------- system prompt (optional) ---
+function wireSystemPrompt() {
+  const box = $('#custom-prompt');
+  const refresh = () => {
+    $('#cp-count').textContent = `${box.value.length} / ${box.maxLength}`;
+    $('#sysprompt').classList.toggle('filled', box.value.trim().length > 0);
+  };
+  const save = debounce(() => {
+    api.put('/api/settings', { defaults: { custom_prompt: box.value.trim(), final_review: $('#final-review').checked } }).catch(() => {});
+  }, 600);
+  box.addEventListener('input', () => { refresh(); save(); });
+  $('#final-review').addEventListener('change', save);
+  $('#cp-clear').addEventListener('click', () => { box.value = ''; refresh(); save(); box.focus(); });
+  if (box.value.trim()) $('#sysprompt').open = true;
+  refresh();
 }
 
 // ------------------------------------------------------------------- init ---
@@ -200,6 +219,9 @@ async function main() {
   $('#language').value = defaults.language;
   $('#carry').checked = defaults.carry_story_bible;
   $('#skip-covers').checked = defaults.skip_covers !== false;
+  $('#final-review').checked = defaults.final_review !== false;
+  $('#custom-prompt').value = defaults.custom_prompt || '';
+  wireSystemPrompt();
   if (defaults.rating === 'nsfw' && adultConfirmed()) setRating('nsfw');
 
   try {

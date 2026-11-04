@@ -224,3 +224,134 @@ def language_instruction(language: str) -> str:
         return ("the language of the comic's own lettering "
                 "(if the lettering is Japanese, Chinese or Korean, write the novel in English)")
     return language
+
+
+# ------------------------------------------------------------------- final review
+MAX_DIRECTION_CHARS = 6000
+
+
+def clean_direction(text: str | None) -> str:
+    """The user's optional system prompt: trimmed, no control characters, capped in length."""
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", (text or "")).replace("\r\n", "\n").strip()
+    return cleaned[:MAX_DIRECTION_CHARS].rstrip()
+
+
+def direction_block(text: str) -> str:
+    """The author's direction as it is given to the writing agents (the rating policy is appended after it)."""
+    if not text:
+        return ""
+    return (
+        "## Author's direction (supplied by the user for this novel)\n\n"
+        f"{text}\n\n"
+        "How to use it: it steers the voice, tone, style, point of view, tense, vocabulary, emphasis and the "
+        "choices you make when turning the comic into prose, on every page. It does NOT change the events or "
+        "the dialogue that the comic page shows, the page-for-page contract, the rating policy or the age rule "
+        "below: those always win over it."
+    )
+
+
+@dataclass
+class PageReview:
+    ok: bool
+    summary: str = ""
+    problem: str = ""
+
+
+_REVIEW_LINE = re.compile(
+    r"^\s*[-*]?\s*\**PAGE\s+(\d+)\**\s*[|:-]\s*\**(OK|ISSUE)\**\s*(?:[|:-]\s*(.*))?$", re.I | re.M)
+
+
+def parse_review_window(text: str) -> dict[int, PageReview]:
+    """Read the revisor's one-line-per-page answer. Pages it did not mention are simply absent."""
+    out: dict[int, PageReview] = {}
+    for m in _REVIEW_LINE.finditer(text or ""):
+        rest = m.group(3) or ""
+        summary = re.search(r"summary\s*:\s*(.*?)(?:\s*\|\s*problem\s*:|$)", rest, re.I)
+        problem = re.search(r"problem\s*:\s*(.*)$", rest, re.I)
+        ok = m.group(2).upper() == "OK"
+        out[int(m.group(1))] = PageReview(
+            ok=ok,
+            summary=(summary.group(1).strip() if summary else rest.split("|")[0].strip())[:200],
+            problem="" if ok else ((problem.group(1).strip() if problem else rest.strip()) or "inconsistent with the rest of the novel")[:300],
+        )
+    return out
+
+
+def parse_page_list(value: str, total: int) -> list[int]:
+    """'4, 17-19' -> [4, 17, 18, 19]; 'none' -> []; clipped to 1..total."""
+    value = (value or "").strip().lower()
+    if not value or value.startswith(("none", "n/a", "-")):
+        return []
+    pages: set[int] = set()
+    for part in re.split(r"[,;\s]+(?:and\s+)?", value):
+        rng = re.fullmatch(r"(\d+)\s*(?:-|–|to)\s*(\d+)", part)
+        if rng:
+            low, high = int(rng.group(1)), int(rng.group(2))
+            pages.update(range(min(low, high), min(max(low, high), total) + 1))
+        elif part.isdigit():
+            pages.add(int(part))
+    return sorted(p for p in pages if 1 <= p <= total)
+
+
+@dataclass
+class Verdict:
+    verdict: str = "unknown"  # coherent | fix-pages | redo-all | unknown (answer not understood)
+    pages: list[int] = field(default_factory=list)
+    all_pages: bool = False
+    notes: str = ""
+    reason: str = ""
+
+
+def parse_verdict(text: str, total: int) -> Verdict:
+    v = Verdict()
+    m = re.search(r"VERDICT\s*[:=]\s*\**\s*(coherent|fix-pages|fix pages|redo-all|redo all)", text or "", re.I)
+    if m:
+        v.verdict = m.group(1).lower().replace(" ", "-")
+    pages = re.search(r"^\s*\**PAGES\**\s*[:=]\s*(.+)$", text or "", re.I | re.M)
+    if pages:
+        raw = pages.group(1).strip().strip("*`")
+        v.all_pages = raw.lower().startswith("all")
+        v.pages = [] if v.all_pages else parse_page_list(raw, total)
+    for attr, key in (("notes", "NOTES"), ("reason", "REASON")):
+        found = re.search(rf"^\s*\**{key}\**\s*[:=]\s*(.+(?:\n(?!\s*\**[A-Z]+\**\s*[:=]).+)*)", text or "", re.I | re.M)
+        if found:
+            value = " ".join(found.group(1).split())[:600]
+            setattr(v, attr, "" if value.strip(" .*`").lower() in ("none", "n/a") else value)
+    return v
+
+
+_PLACEHOLDER = re.compile(r"^\[Page \d+ could not be", re.I)
+_LEAK = re.compile(r"\[\[CTS-|\bas an ai\b|^\s*(here is|here's) (the|your) (page|text)", re.I)
+
+
+def _shingles(text: str, n: int = 5) -> set[tuple[str, ...]]:
+    words = re.findall(r"\w+", text.lower())
+    return {tuple(words[i:i + n]) for i in range(max(0, len(words) - n + 1))}
+
+
+def mechanical_issues(pages: list[tuple[int, str]]) -> dict[int, str]:
+    """Free, deterministic checks over (page number, text) pairs: nothing here needs an LLM.
+
+    Catches what can never be coherent: empty pages, placeholders for pages that failed, refusals,
+    leaked instructions and a page that repeats the one before it.
+    """
+    issues: dict[int, str] = {}
+    previous: tuple[int, set] | None = None
+    for number, text in pages:
+        body = (text or "").strip()
+        if not body:
+            issues[number] = "the page is empty"
+        elif _PLACEHOLDER.match(body):
+            issues[number] = "the page was never written (placeholder)"
+        elif looks_like_refusal(body):
+            issues[number] = "the page is a refusal, not prose"
+        elif _LEAK.search(body):
+            issues[number] = "the page contains an instruction or an assistant remark instead of only prose"
+        else:
+            current = _shingles(body)
+            if previous and len(current) >= 8 and len(previous[1]) >= 8:
+                overlap = len(current & previous[1]) / max(1, min(len(current), len(previous[1])))
+                if overlap >= 0.8:
+                    issues[number] = f"the page repeats page {previous[0]} almost word for word"
+            previous = (number, current)
+    return issues

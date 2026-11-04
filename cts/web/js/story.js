@@ -46,6 +46,7 @@ export function initStory(callbacks) {
     $('#bible').showModal();
   });
   $('#log-btn').addEventListener('click', () => { renderLog(); $('#log').showModal(); });
+  $('#review-btn').addEventListener('click', () => { renderReviewDialog(); $('#review').showModal(); });
   $('#feed').addEventListener('scroll', () => {
     if (!cur) return;
     const f = $('#feed');
@@ -101,7 +102,7 @@ export async function openJob(id) {
 }
 
 function normalise(snap) {
-  for (const v of snap.volumes) v.pageMap = new Map(v.pages.map((p) => [p.index, p]));
+  for (const v of snap.volumes) { v.pageMap = new Map(v.pages.map((p) => [p.index, p])); v.review = v.review || { status: '', rounds: [] }; }
   return snap;
 }
 
@@ -129,7 +130,9 @@ function applyEvent(e) {
       if (TERMINAL.has(e.status)) {
         snap.finished = e.ts; clearInterval(tick);
         for (const vol of snap.volumes) {  // nothing is running any more
+          if (vol.review?.status === 'running') vol.review.status = 'interrupted';
           for (const pg of vol.pageMap.values()) {
+            pg.revising = false;
             if (pg.status === 'running') { pg.status = 'stopped'; pg.steps = Object.fromEntries(Object.entries(pg.steps || {}).filter(([, x]) => x === 'done')); }
           }
           if (vol.status === 'running') vol.status = 'partial';
@@ -145,10 +148,22 @@ function applyEvent(e) {
     case 'activity': snap.activity = e.message; renderNow(); return;
     case 'log': snap.log.push(e); snap.log.splice(0, Math.max(0, snap.log.length - 300)); return;
     case 'volume_start': v.status = 'running'; v.total = e.total; if (e.volume !== cur.selected && !cur.userPicked) selectVolume(e.volume); renderTabs(); return;
-    case 'page_start': { const p = page(e.volume, e.page); p.status = 'running'; p.steps = {}; break; }
-    case 'step': { const p = page(e.volume, e.page); p.status = 'running'; p.steps[e.step] = e.status; snap.activity = `Volume ${e.volume + 1} - page ${e.page}: ${labelFor(e.step)}`; break; }
+    case 'page_start': {
+      const p = page(e.volume, e.page);
+      if (e.revision) { p.revising = true; p.steps = {}; } // rewritten after the final review: the old text stays meanwhile
+      else { p.status = 'running'; p.steps = {}; }
+      break;
+    }
+    case 'review_start': v.review = { status: 'running', rounds: [] }; snap.activity = `Volume ${e.volume + 1}: final review - the whole novel is being read`; renderReview(); renderNow(); return;
+    case 'review_step': {
+      const label = { windows: `reading the novel (part ${e.current}/${e.total})`, global: 'judging the whole novel', fix: `rewriting page ${e.page} (${e.current}/${e.total})`, 'redo-all': 'writing the whole volume again' }[e.step] || 'reviewing';
+      snap.activity = `Volume ${e.volume + 1}: final review - ${label}`; renderNow(); return;
+    }
+    case 'review_result': v.review = { status: e.status, rounds: e.rounds }; renderReview(); renderNow(); if (e.volume === cur.selected) renderFeed(); return;
+    case 'step': { const p = page(e.volume, e.page); if (!p.revising) p.status = 'running'; p.steps[e.step] = e.status; snap.activity = `Volume ${e.volume + 1} - page ${e.page}: ${labelFor(e.step)}`; break; }
     case 'page_done': {
       const p = page(e.volume, e.page);
+      p.revising = false;
       Object.assign(p, e.record);
       if (e.record.status === 'skipped') { p.steps = { cover: 'done' }; p.status = 'skipped'; }
       else { p.steps = Object.fromEntries(STEPS.map(([k]) => [k, 'done'])); p.status = e.record.status === 'done' ? 'done' : 'failed'; }
@@ -171,7 +186,7 @@ const labelFor = (step) => ({ cover: 'checking whether it is a book cover', anal
 
 // ------------------------------------------------------------------- render ---
 function renderAll() {
-  renderHeader(); renderAlert(); renderStats(); renderTabs(); renderNow(); renderDownloads(); renderFeed();
+  renderHeader(); renderAlert(); renderStats(); renderTabs(); renderNow(); renderDownloads(); renderReview(); renderFeed();
   hooks.onStatus(cur.snap.status, cur.snap);
 }
 
@@ -242,7 +257,7 @@ function renderTabs() {
 
 function selectVolume(i) {
   cur.selected = i;
-  renderTabs(); renderDownloads(); renderFeed(); renderNow();
+  renderTabs(); renderDownloads(); renderReview(); renderFeed(); renderNow();
 }
 
 function renderNow() {
@@ -265,6 +280,43 @@ function renderDownloads() {
     const a = h('a', { class: `dl ${ready ? '' : 'off'}`, 'aria-disabled': String(!ready) }, icon('download'), fmt.toUpperCase() + (ready ? label : ''));
     if (ready) { a.href = `/api/jobs/${cur.id}/volumes/${cur.selected}/download?format=${fmt}`; a.setAttribute('download', ''); }
     return a;
+  }));
+}
+
+const REVIEW_LABEL = { running: 'Final review...', passed: 'Review passed', warning: 'Review: open issues', skipped: 'Review skipped', interrupted: 'Review interrupted' };
+
+function renderReview() {
+  const v = selectedVolume();
+  const btn = $('#review-btn');
+  const status = v?.review?.status || '';
+  btn.hidden = !status;
+  $('#review-label').textContent = REVIEW_LABEL[status] || 'Review';
+}
+
+function renderReviewDialog() {
+  const v = selectedVolume();
+  const rounds = v?.review?.rounds || [];
+  const box = $('#review-body');
+  const verdictText = { coherent: 'coherent', 'fix-pages': 'pages to rewrite', 'redo-all': 'redo everything', skipped: 'could not run' };
+  const rewritten = [...new Set(rounds.flatMap((r) => (r.action === 'fix-pages' ? r.pages || [] : [])))].sort((a, b) => a - b);
+  const redone = rounds.some((r) => r.action === 'redo-all');
+  const intro = {
+    passed: redone ? 'The Final Revisor found the novel incoherent, so the whole volume was written again; the new version is coherent.'
+      : rewritten.length ? `The Final Revisor had pages ${rewritten.join(', ')} written again and then found the novel coherent.`
+      : 'The Final Revisor read the whole novel and found it coherent.',
+    warning: 'The Final Revisor still saw problems after the allowed rewrites; the novel was delivered with the issues listed below.',
+    skipped: 'The review could not run, so the novel was delivered without it.',
+    running: 'The review is running...', interrupted: 'The review was interrupted.',
+  }[v?.review?.status] || 'No review for this volume.';
+  box.replaceChildren(h('p', { class: 'hint', style: { margin: '4px 0 14px' } }, intro), ...rounds.map((r) => {
+    const problems = Object.entries(r.problems || {});
+    return h('section', { class: 'review-round' },
+      h('h3', {}, `Review ${r.attempt}`, h('span', { class: `verdict ${r.verdict}` }, verdictText[r.verdict] || r.verdict),
+        r.action && r.action !== 'pass' ? h('span', { class: 'muted' }, `-> ${r.action}`) : null),
+      r.reason ? h('p', {}, r.reason) : null,
+      r.pages?.length ? h('p', {}, `Pages written again: ${r.pages.join(', ')}`) : null,
+      r.notes ? h('p', { class: 'muted' }, `Direction given for the rewrite: ${r.notes}`) : null,
+      problems.length ? h('ul', {}, problems.map(([n, why]) => h('li', {}, `Page ${n}: ${why}`))) : null);
   }));
 }
 
@@ -345,9 +397,11 @@ function buildCard(vol, p) {
   const card = h('article', { class: `page ${p.status}`, id: `p-${vol}-${p.index}` },
     shot,
     h('div', { class: 'page-main' },
+      p.revising ? h('div', { class: 'revising-note' }, icon('refresh'), 'Rewriting this page after the final review...') : null,
       h('div', { class: 'page-head' },
         h('div', { class: 'page-title' }, `Page ${p.index}`, meta.length ? h('small', {}, meta.join(' - ')) : null,
-          p.rating_used ? h('span', { class: `tag ${p.rating_used}` }, p.rating_used) : null),
+          p.rating_used ? h('span', { class: `tag ${p.rating_used}` }, p.rating_used) : null,
+          p.revisions ? h('span', { class: 'tag revised' }, `revised${p.revisions > 1 ? ` x${p.revisions}` : ''}`) : null),
         h('div', { class: 'steps' }, (p.status === 'skipped' ? [COVER_STEP] : p.steps?.cover ? [COVER_STEP, ...STEPS] : STEPS).map((s) => stepChip(s, p)))),
       body));
   cur.cards.set(p.index, card);

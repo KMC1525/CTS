@@ -11,6 +11,7 @@ run time, so you can tune the quality of your novels without touching any Python
 | `rating_sfw.md` | Novelist (SFW mode) | Content limits for the all-audiences version |
 | `rating_nsfw.md` | Novelist (NSFW mode) | Content rules for the adults-only version, including the age rule: a clearly under-18 character halts the process; stated adults, or no age mentioned, continue |
 | `editor.md` | Editor | The polish pass: fidelity check, style, length budget |
+| `final-revisor.md` | Final Revisor | Reads the finished novel as a book before delivery: judges coherence page windows and the whole, and says which pages (or the whole volume) must be written again |
 | `story_keeper.md` | Story Keeper | The running "story bible" that keeps names, looks and plot consistent |
 
 ## Customising
@@ -29,3 +30,7 @@ goal: The agent's one-line goal
 ```
 
 Everything after the second `---` is the system prompt body.
+
+## Your own system prompt
+
+Separately from these files, the web UI has an optional **System prompt** box under the novel options. Whatever you write there is added to the novelist, editor and story keeper (after `novelist.md`/`editor.md`/`story_keeper.md` and before the rating policy) and is shown to the final revisor. It steers voice, tone and style; it never overrides the rating policy, the age rule or the one-page-per-page contract.

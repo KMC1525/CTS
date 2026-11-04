@@ -90,6 +90,20 @@
           <input type="checkbox" id="skip-covers" checked>
           <span>Skip book covers (a cover never becomes a novel page)</span>
         </label>
+        <label class="check">
+          <input type="checkbox" id="final-review" checked>
+          <span>Final review before delivery (the whole novel is checked for coherence; pages that do not fit are rewritten)</span>
+        </label>
+        <details class="sysprompt" id="sysprompt">
+          <summary>System prompt <em class="muted">(optional)</em></summary>
+          <textarea id="custom-prompt" rows="6" maxlength="6000" spellcheck="false" aria-label="System prompt (optional)"
+            placeholder="Direction for the narrative, for example: Write in a hard-boiled noir voice, first person, present tense. Short sentences, rain and cigarette smoke, a cynical narrator."></textarea>
+          <div class="row-between tight">
+            <span class="hint" id="cp-count">0 / 6000</span>
+            <button type="button" class="ghost" id="cp-clear">Clear</button>
+          </div>
+          <p class="hint">Steers the voice, tone, style and point of view of the whole novel - in both the SFW and the NSFW edition. It does not change what happens on each comic page, the edition's rating rules or the age rule.</p>
+        </details>
         <button type="button" class="primary" id="start" disabled>
           <svg class="icon"><use href="#i-sparkle"/></svg><span>Generate novel</span>
         </button>
@@ -142,6 +156,7 @@
           <div class="now" id="now" aria-live="polite"></div>
           <div class="vol-actions">
             <button type="button" class="ghost" id="bible-btn"><svg class="icon"><use href="#i-book"/></svg>Story bible</button>
+            <button type="button" class="ghost" id="review-btn" hidden><svg class="icon"><use href="#i-check"/></svg><span id="review-label">Review</span></button>
             <button type="button" class="ghost" id="log-btn"><svg class="icon"><use href="#i-alert"/></svg>Activity</button>
             <span class="downloads" id="downloads"></span>
           </div>
@@ -271,6 +286,12 @@
     <form method="dialog" class="dlg-head"><h2 id="bible-title">Story bible</h2>
       <button class="icon-btn" value="close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button></form>
     <pre class="bible-text" id="bible-text"></pre>
+  </dialog>
+
+  <dialog id="review" aria-labelledby="review-title" class="reader">
+    <form method="dialog" class="dlg-head"><h2 id="review-title">Final review</h2>
+      <button class="icon-btn" value="close" aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button></form>
+    <div class="review-body" id="review-body"></div>
   </dialog>
 
   <dialog id="log" aria-labelledby="log-title" class="reader">

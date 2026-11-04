@@ -3,14 +3,15 @@
 **CTS turns comic volumes into novels.** Drop a folder or ZIP of comic pages, and a team of AI agents reads every page, writes it as prose, edits it, and keeps the story consistent from the first page to the last - producing a complete novel in either an **SFW** or an **NSFW** edition.
 
 - **One comic page = one novel page.** Pacing, order and dialogue stay faithful to the original. Book covers are recognised and **skipped** - a cover is packaging, not story.
-- **Multi-step agents** built with [CrewAI](https://github.com/crewAIInc/crewAI): *Read → Write → Polish → Remember* for every page.
+- **Multi-step agents** built with [CrewAI](https://github.com/crewAIInc/crewAI): *Read → Write → Polish → Remember* for every page, then a **Final Revisor** that reads the whole novel as a book before you get it: coherent -> it passes; otherwise the pages that do not fit - or the whole volume - are written again.
+- **Your own system prompt (optional)** to steer the narrative - voice, tone, style, point of view - in both the SFW and the NSFW edition.
 - **Bring your own AI:** frontier models (Claude, ChatGPT, Grok, Gemini, OpenRouter, any OpenAI-compatible endpoint) **or** local GGUF models from Hugging Face, with the quantization of your choice.
 - **Batch mode:** attach several volumes and CTS writes them one after another (volume 1, then 2, then 3...), carrying names and plot between volumes.
 - **Export** the finished novel as **TXT, DOCX or PDF** (6 x 9 in pages, one novel page per comic page).
 - **A clean, dark web UI** (plain HTML, CSS and JavaScript - no build step) that runs locally on your computer.
 - **Private by default:** everything runs on your machine; CrewAI telemetry is switched off. Comic pages only leave your computer if *you* pick a hosted AI provider.
 
-> **Status: v0.3 (early release).** The pipeline, UI and Linux installer have been exercised end to end, and the llama.cpp installer and the connection to the local engine are covered by tests that simulate GitHub releases and a llama-server. The Windows and macOS installers follow the same design but have not been verified on real machines yet - please [open an issue](https://github.com/KMC1525/CTS/issues) if anything misbehaves. See the [changelog](CHANGELOG.md) for what is new.
+> **Status: v0.4 (early release).** The pipeline, UI and Linux installer have been exercised end to end, and the llama.cpp installer and the connection to the local engine are covered by tests that simulate GitHub releases and a llama-server. The Windows and macOS installers follow the same design but have not been verified on real machines yet - please [open an issue](https://github.com/KMC1525/CTS/issues) if anything misbehaves. See the [changelog](CHANGELOG.md) for what is new.
 
 ---
 
@@ -62,8 +63,8 @@ Run the same install command again, or run `cts update`. An update **reinstalls 
    - *Frontier AI:* pick a provider, paste your API key, choose a vision-capable model.
    - *Local models (GGUF):* pick a model, press **Show quantizations**, choose one, and **Install**.
 2. **Attach your comic** - drag a folder or ZIP/CBZ onto the **zip box** on the left (or use the *ZIP / CBZ* and *Folder* buttons). Add as many volumes as you like.
-3. **Pick the options** - SFW or NSFW edition, words per page, novel language.
-4. **Press Generate.** Watch the **story box** on the right: every page shows its progress through *Read → Write → Polish → Remember*, and the novel text appears as it is written.
+3. **Pick the options** - SFW or NSFW edition, words per page, novel language, whether to skip covers, whether to run the final review, and (optionally) your own **system prompt** to direct the narrative.
+4. **Press Generate.** Watch the **story box** on the right: every page shows its progress through *Read → Write → Polish → Remember*, and the novel text appears as it is written. When all pages are written the **final review** runs; the *Review* button shows its report.
 5. **Download** the volume as **TXT**, **DOCX** or **PDF** when it is ready. You can stop at any time and download what exists so far, or resume later.
 
 ---
@@ -83,7 +84,11 @@ flowchart LR
     F --> G["Remember<br/>Story Keeper"]
     G -->|story bible| C
     G -->|story bible| E
-    F --> H[TXT / DOCX / PDF]
+    F --> R{"Final review<br/>Final Revisor reads the whole novel"}
+    R -->|coherent| H[TXT / DOCX / PDF]
+    R -->|some pages do not fit| P[Rewrite only those pages]
+    P --> R
+    R -->|incoherent as a whole| C
 ```
 
 For **every page**, CTS runs small CrewAI crews (the first step only on the first and last pages of a volume):
@@ -94,9 +99,32 @@ For **every page**, CTS runs small CrewAI crews (the first step only on the firs
 | **Read** | Comic Page Analyst | Looks at the page image: reading order (including right-to-left manga), every panel, all dialogue and captions verbatim, characters and the ages the comic states, mood - plus safety flags. |
 | **Write** | Novelist | Writes exactly one page of prose from the analysis, the **story bible** and the most recent novel pages. |
 | **Polish** | Editor | Checks fidelity against the analysis, continuity, style and the word budget. Over-long pages are condensed. |
+| **Final review** | Final Revisor | After the last page, reads the finished novel as a book and judges its coherence - see [Final review](#final-review). |
 | **Remember** | Story Keeper | Updates the **story bible** (voice, characters, places, plot so far, open threads) so the next page - and the next volume - stays consistent. |
 
 Progress is saved page by page, so an interrupted job can be **resumed** without repeating finished pages.
+
+### Final review
+
+Before a volume is delivered, the **Final Revisor** (prompt: [`final-revisor.md`](cts/prompts/final-revisor.md)) reads all the written pages **as a book** - the pages are checked one by one while they are written, but only a whole-book read can catch a coat that changes colour on page 40, a narrator who slips from third person to first, or a page that restarts the scene. It never rewrites anything itself; it only judges:
+
+1. **Windows.** The novel is read in windows of consecutive pages that fit your model's context window, together with the story bible. For every page the revisor writes a one-line summary and, if something is wrong, the concrete problem ("the bible says her coat is red").
+2. **Mechanical checks (no model needed).** Empty pages, placeholders for pages that failed, refusals, leaked instructions and a page that repeats the previous one are found by plain code. These pages are *always* written again, even if the revisor says the rest is fine.
+3. **Verdict.** From the bible, the one-line summaries and the problems found, the revisor decides:
+   - **`coherent`** -> the novel **passes** and is delivered as it is;
+   - **`fix-pages`** -> only the pages it names are written again, with its notes and the faulty version in front of the writer. The saved page analysis is reused, so **the comic image is not read again**, and every other page is kept exactly as it was. Only the rewritten pages (and their neighbours) are reviewed again;
+   - **`redo-all`** -> the book is incoherent as a whole (for example the voice or the names are inconsistent on most pages) and the **entire volume is produced again** - images included - guided by the revisor's notes.
+4. **A limit, so it cannot loop.** At most **two rewrites** are made per volume (a rewrite is either some pages or the whole volume). If problems remain after that, the novel is delivered anyway and the report says what is left (*Review: open issues*). If the review cannot run (for example the provider fails), the novel is delivered without it.
+
+The report of every round - verdict, reason, pages rewritten, the problems found - is in the **Review** button of the story box and is saved with the job. A volume that was already reviewed is not reviewed again when you resume, unless its text changed. Turn the review off with *Final review before delivery* under the novel options; it costs one model call per window of pages plus one for the verdict (a few calls for a typical volume), and more only when pages are rewritten.
+
+### System prompt (optional)
+
+Under the novel options, **System prompt (optional)** is a text box (up to 6,000 characters) where you can write your own direction for the narrative - for example *"Write in a hard-boiled noir voice: first person, present tense, short cynical sentences"*, *"Make it a gothic ghost story with long, slow sentences"*, or *"Keep the narrator warm and a little funny"*. It is remembered between sessions.
+
+- It applies to the **SFW and the NSFW edition** alike, on every page, and is also given to the story keeper (so the voice it records matches) and to the final revisor (so the style you asked for is not reported as a defect).
+- It steers **voice, tone, style, point of view, tense, vocabulary and emphasis**. It does **not** change what happens on each comic page, the one-page-per-page contract, the rating policy of the edition or the **age rule** - those always win. The age rule is enforced by code on the page analysis, so no system prompt can switch it off.
+- It is placed after the built-in novelist prompt and *before* the rating policy, so the rating rules remain the last thing the model reads.
 
 ### Context window
 
@@ -152,7 +180,7 @@ Each volume produces a `TXT`, `DOCX` and `PDF`: a title page, then one novel pag
 
 The model **must accept images**. The model name box accepts any model id, so new models work as soon as your provider offers them. API keys are stored only in your local `settings.json` (owner-readable), and are never sent back to the browser. As a fallback CTS reads the usual environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`).
 
-> Hosted AI usage is billed by your provider. A page costs roughly four model calls (one with an image), so a 200-page volume is on the order of 800 calls - check your provider's pricing first.
+> Hosted AI usage is billed by your provider. A page costs roughly four model calls (one with an image), so a 200-page volume is on the order of 800 calls, plus a few dozen for the final review (more if pages must be rewritten) - check your provider's pricing first.
 
 ### Local models (GGUF via Hugging Face)
 
